@@ -380,7 +380,6 @@ def main():
 
     conv = ConversationHandler(
         entry_points=[
-            CommandHandler("кп", cmd_kp),
             CommandHandler("kp", cmd_kp),
         ],
         states={
