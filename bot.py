@@ -17,38 +17,39 @@ TEMPLATE_VYEZD = "template_vyezd.pptx"
 
 NAME, LOCATION, ADDRESS, DATE, TIME_, FORMAT_TYPE, PROGRAM, PRICE, CONFIRM = range(9)
 
-# Блоки с фиксированной длительностью (не зависит от режима)
-FIXED_BLOCKS = {
+# Фиксированные блоки — длительность не меняется
+FIXED_DUR = {
     "velkom": "20 мин",
     "break_": "10 мин",
 }
 
-# Блоки программы: (id, название, есть выбор длит для выезда)
 PROGRAM_BLOCKS = [
-    ("velkom",  "Велком",              False),
-    ("gn",      "Good Night",          True),
-    ("break_",  "Перерыв",             False),
-    ("kk",      "Karaoke Star",        True),
-    ("bad",     "Bad Night 21+",       True),
-    ("ktokogo", "Кто Кого",            True),
-    ("arenda",  "Аренда студии",       True),
-    ("disco",   "Дискотека с диджеем", True),
-    ("mafia",   "Мафия",               True),
+    ("velkom",  "Велком"),
+    ("gn",      "Good Night"),
+    ("break_",  "Перерыв"),
+    ("kk",      "Karaoke Star"),
+    ("bad",     "Bad Night 21+"),
+    ("ktokogo", "Кто Кого"),
+    ("arenda",  "Аренда студии"),
+    ("disco",   "Дискотека с диджеем"),
+    ("mafia",   "Мафия"),
 ]
-DURATIONS = ["30 мин", "1 час", "1.5 часа", "2 часа"]
+
+DURATIONS = ["20 мин", "30 мин", "1 час", "1.5 часа", "2 часа"]
+
+# Базовые длительности по формату
+BASE_DUR = {
+    "game":   {"default": "1.5 часа", "arenda": "1.5 часа"},
+    "packet": {"default": "1 час",    "arenda": "30 мин"},
+    "free":   {"default": "1 час",    "arenda": "1 час"},
+}
 
 
-def get_dur(bid, selected, fmt):
-    """Возвращает длительность блока исходя из режима"""
-    if bid in FIXED_BLOCKS:
-        return FIXED_BLOCKS[bid]
-    if bid == "arenda" and fmt == "packet":
-        return "30 мин"
-    if fmt == "game":
-        return "1.5 часа"
-    if fmt == "packet":
-        return "1 час"
-    return selected.get(bid, "1 час")
+def get_base_dur(bid, fmt):
+    if bid in FIXED_DUR:
+        return FIXED_DUR[bid]
+    base = BASE_DUR.get(fmt, BASE_DUR["free"])
+    return base.get(bid, base["default"])
 
 
 def kb_location():
@@ -61,34 +62,36 @@ def kb_location():
 
 def kb_format_type():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Игра (блоки по 1.5 часа)",     callback_data="fmt_game")],
-        [InlineKeyboardButton("Пакет (блоки по 1 часу)",       callback_data="fmt_packet")],
-        [InlineKeyboardButton("Выезд / свободный выбор",       callback_data="fmt_free")],
+        [InlineKeyboardButton("Игра (база: 1.5 ч на блок)",  callback_data="fmt_game")],
+        [InlineKeyboardButton("Пакет (база: 1 ч на блок)",   callback_data="fmt_packet")],
+        [InlineKeyboardButton("Свободный выбор",              callback_data="fmt_free")],
     ])
 
 
 def kb_program(selected, fmt, dur_mode=None):
     rows = []
     n = 1
-    for bid, bname, has_dur in PROGRAM_BLOCKS:
+    for bid, bname in PROGRAM_BLOCKS:
         is_on = bid in selected
+        is_fixed = bid in FIXED_DUR
         icon = "[x]" if is_on else "[ ]"
         num = str(n) if is_on else " "
-        dur = get_dur(bid, selected, fmt) if is_on else ""
+        dur = selected.get(bid, get_base_dur(bid, fmt)) if is_on else ""
         label = f"{icon} {num}. {bname}" + (f" - {dur}" if dur else "")
         if is_on:
             n += 1
 
-        # Выбор длительности только для выезда (free) и блоков с has_dur
-        if fmt == "free" and has_dur and is_on and dur_mode == bid:
+        # Показываем выбор длительности если нажата кнопка "время"
+        if not is_fixed and is_on and dur_mode == bid:
             rows.append([InlineKeyboardButton(
                 (">" if d == selected.get(bid) else "") + d,
                 callback_data=f"dur_{bid}_{d}"
             ) for d in DURATIONS])
 
         row = [InlineKeyboardButton(label, callback_data=f"tog_{bid}")]
-        if fmt == "free" and has_dur and is_on and dur_mode != bid:
-            row.append(InlineKeyboardButton("время", callback_data=f"editdur_{bid}"))
+        # Кнопка смены времени для всех включённых нефиксированных блоков
+        if not is_fixed and is_on and dur_mode != bid:
+            row.append(InlineKeyboardButton("⏱", callback_data=f"editdur_{bid}"))
         rows.append(row)
 
     rows.append([InlineKeyboardButton("Готово", callback_data="prog_done")])
@@ -96,10 +99,8 @@ def kb_program(selected, fmt, dur_mode=None):
 
 
 def replace_shape_text(xml_str, shape_name, new_text, sz="1600", bold="1"):
-    """Заменяет текст в shape с правильным стилем (белый Georgia)"""
     def replacer(m):
         sp = m.group(0)
-        # Создаём параграф с правильным стилем
         para = (
             f'<a:p><a:r>'
             f'<a:rPr lang="ru-RU" sz="{sz}" b="{bold}" dirty="0">'
@@ -152,7 +153,7 @@ def build_pptx(data):
     with zipfile.ZipFile(template, 'r') as z:
         z.extractall(work_dir)
 
-    # Слайд 1: имя
+    # Слайд 1
     s1_path = os.path.join(work_dir, 'ppt/slides/slide1.xml')
     with open(s1_path, 'r', encoding='utf-8') as f:
         s1 = f.read()
@@ -161,21 +162,17 @@ def build_pptx(data):
     with open(s1_path, 'w', encoding='utf-8') as f:
         f.write(s1)
 
-    # Слайд 3: подставляем данные с правильным стилем
+    # Слайд 3
     s3_path = os.path.join(work_dir, 'ppt/slides/slide3.xml')
     with open(s3_path, 'r', encoding='utf-8') as f:
         s3 = f.read()
 
-    s3 = replace_shape_text(s3, 'TextBox_new_51',
-                            f'Дата: {date}  |  Время: {time_}', sz="1600")
-    s3 = replace_shape_text(s3, 'TextBox_new_54',
-                            program_lines, sz="1600")
+    s3 = replace_shape_text(s3, 'TextBox_new_51', f'Дата: {date}  |  Время: {time_}', sz="1600")
+    s3 = replace_shape_text(s3, 'TextBox_new_54', program_lines, sz="1600")
     price_label = f'{price} руб (общая стоимость)' if is_vyezd else f'{price} руб/чел'
-    s3 = replace_shape_text(s3, 'TextBox_new_55',
-                            price_label, sz="3200")
+    s3 = replace_shape_text(s3, 'TextBox_new_55', price_label, sz="3200")
     addr = address if is_vyezd else 'Денисовский переулок 30, стр. 1'
-    s3 = replace_shape_text(s3, 'TextBox 13',
-                            addr, sz="1600")
+    s3 = replace_shape_text(s3, 'TextBox 13', addr, sz="1600")
 
     with open(s3_path, 'w', encoding='utf-8') as f:
         f.write(s3)
@@ -236,22 +233,20 @@ async def got_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['time'] = update.message.text.strip()
     loc = ctx.user_data['location']
     if loc == 'vyezd':
-        # Выезд — сразу к программе с свободным выбором
         ctx.user_data['fmt'] = 'free'
         ctx.user_data['selected'] = {}
         ctx.user_data['dur_mode'] = None
         await update.message.reply_text(
-            "Выбери блоки программы:",
+            "Выбери блоки программы.\n"
+            "Кнопка ⏱ меняет длительность блока:",
             reply_markup=kb_program({}, 'free')
         )
         return PROGRAM
-    else:
-        # Студия — спрашиваем формат
-        await update.message.reply_text(
-            "Что будем предлагать?",
-            reply_markup=kb_format_type()
-        )
-        return FORMAT_TYPE
+    await update.message.reply_text(
+        "Выбери формат:",
+        reply_markup=kb_format_type()
+    )
+    return FORMAT_TYPE
 
 
 async def got_format_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -263,9 +258,9 @@ async def got_format_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['dur_mode'] = None
 
     hints = {
-        'game':   "Игра — блоки по 1.5 часа. Выбери что включить:",
-        'packet': "Пакет — блоки по 1 часу, аренда студии 30 мин. Выбери что включить:",
-        'free':   "Свободный выбор — настрой длительность каждого блока:",
+        'game':   "Игра — база 1.5 ч на блок.\nКнопка ⏱ меняет длительность:",
+        'packet': "Пакет — база 1 ч, аренда 30 мин.\nКнопка ⏱ меняет длительность:",
+        'free':   "Свободный выбор.\nКнопка ⏱ меняет длительность:",
     }
     await query.edit_message_text(
         hints[fmt],
@@ -285,9 +280,12 @@ async def program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         bid = data[4:]
         if bid in sel:
             del sel[bid]
+            if ctx.user_data.get('dur_mode') == bid:
+                ctx.user_data['dur_mode'] = None
         else:
-            sel[bid] = get_dur(bid, sel, fmt)
-        ctx.user_data['dur_mode'] = None
+            sel[bid] = get_base_dur(bid, fmt)
+        if bid not in FIXED_DUR:
+            ctx.user_data['dur_mode'] = None
 
     elif data.startswith('editdur_'):
         ctx.user_data['dur_mode'] = data[8:]
@@ -329,9 +327,9 @@ async def got_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     fmt = ctx.user_data.get('fmt', 'free')
     n = 1
     lines = []
-    for bid, bname, _ in PROGRAM_BLOCKS:
+    for bid, bname in PROGRAM_BLOCKS:
         if bid in sel:
-            dur = get_dur(bid, sel, fmt)
+            dur = sel[bid]
             lines.append(f"{n}) {bname} - {dur}")
             n += 1
     ctx.user_data['program_lines'] = '\n'.join(lines)
@@ -340,7 +338,7 @@ async def got_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     loc = loc_labels[ctx.user_data['location']]
     addr = ctx.user_data.get('address', 'Денисовский переулок 30, стр. 1')
     is_vyezd = ctx.user_data['location'] == 'vyezd'
-    fmt_labels = {'game': 'Игра', 'packet': 'Пакет', 'free': 'Выезд'}
+    fmt_labels = {'game': 'Игра', 'packet': 'Пакет', 'free': 'Выезд / свободный'}
     fmt_label = fmt_labels.get(fmt, '')
 
     summary = (
