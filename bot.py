@@ -9,74 +9,67 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 
-TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_ТОКЕН_СЮДА")
+TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# Шаблоны — переименуй и положи рядом с bot.py
-TEMPLATE_BIG   = "template_big.pptx"    # кп1 — большая студия
-TEMPLATE_SMALL = "template_small.pptx"  # кп2 — малая студия
-TEMPLATE_VYEZD = "template_vyezd.pptx"  # кп3 — выезд
+TEMPLATE_BIG   = "template_big.pptx"
+TEMPLATE_SMALL = "template_small.pptx"
+TEMPLATE_VYEZD = "template_vyezd.pptx"
+SLIDE3_REF     = "slide3_ref.pptx"
 
-# Эталон слайда 3 — из КП_Даша_18.06.pptx
-SLIDE3_REF = "slide3_ref.pptx"
+NAME, LOCATION, ADDRESS, DATE, TIME_, PROGRAM, PRICE, CONFIRM = range(8)
 
-# Состояния диалога
-(NAME, LOCATION, ADDRESS, DATE, TIME_,
- PROGRAM, PRICE, CONFIRM) = range(8)
-
-# Блоки программы: (id, название, длит по умолчанию, есть выбор длит)
 PROGRAM_BLOCKS = [
-    ("velkom",   "Велком",              "20 мин",   False),
-    ("gn",       "Good Night",          "1 час",    True),
-    ("break_",   "Перерыв",             "10 мин",   False),
-    ("kk",       "Karaoke Star",        "1 час",    True),
-    ("bad",      "Bad Night 21+",       "1 час",    True),
-    ("ktokogo",  "Кто Кого",            "1.5 часа", True),
-    ("arenda",   "Аренда студии",       "1.5 часа", True),
-    ("disco",    "Дискотека с диджеем", "1 час",    True),
-    ("mafia",    "Мафия",               "1 час",    True),
+    ("velkom",  "Велком",              "20 мин",   False),
+    ("gn",      "Good Night",          "1 час",    True),
+    ("break_",  "Перерыв",             "10 мин",   False),
+    ("kk",      "Karaoke Star",        "1 час",    True),
+    ("bad",     "Bad Night 21+",       "1 час",    True),
+    ("ktokogo", "Кто Кого",            "1.5 часа", True),
+    ("arenda",  "Аренда студии",       "1.5 часа", True),
+    ("disco",   "Дискотека с диджеем", "1 час",    True),
+    ("mafia",   "Мафия",               "1 час",    True),
 ]
 DURATIONS = ["30 мин", "1 час", "1.5 часа", "2 часа"]
 ORDER = [b[0] for b in PROGRAM_BLOCKS]
 
 
-# ─── Клавиатуры ──────────────────────────────────────────────────────────────
-
 def kb_location():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏢 Большая студия", callback_data="loc_big")],
-        [InlineKeyboardButton("🏠 Малая студия",   callback_data="loc_small")],
-        [InlineKeyboardButton("🚗 Выезд",          callback_data="loc_vyezd")],
+        [InlineKeyboardButton("Большая студия", callback_data="loc_big")],
+        [InlineKeyboardButton("Малая студия",   callback_data="loc_small")],
+        [InlineKeyboardButton("Выезд",          callback_data="loc_vyezd")],
     ])
+
 
 def kb_program(selected: dict, dur_mode: str = None):
     rows = []
     n = 1
     for bid, bname, bdefault, has_dur in PROGRAM_BLOCKS:
         is_on = bid in selected
-        icon = "✅" if is_on else "☐"
+        icon = "[x]" if is_on else "[ ]"
         dur = selected.get(bid, bdefault)
-        label = f"{icon} {n if is_on else ' '}. {bname}" + (f" — {dur}" if is_on else "")
-        if is_on: n += 1
+        num = str(n) if is_on else " "
+        label = f"{icon} {num}. {bname}" + (f" - {dur}" if is_on else "")
+        if is_on:
+            n += 1
 
         if has_dur and is_on and dur_mode == bid:
             dur_row = [InlineKeyboardButton(
-                f"{'•' if d == dur else ''}{d}", callback_data=f"dur_{bid}_{d}"
+                (">" if d == dur else "") + d,
+                callback_data=f"dur_{bid}_{d}"
             ) for d in DURATIONS]
             rows.append(dur_row)
 
         row = [InlineKeyboardButton(label, callback_data=f"tog_{bid}")]
         if has_dur and is_on and dur_mode != bid:
-            row.append(InlineKeyboardButton("⏱", callback_data=f"editdur_{bid}"))
+            row.append(InlineKeyboardButton("время", callback_data=f"editdur_{bid}"))
         rows.append(row)
 
-    rows.append([InlineKeyboardButton("✔ Готово", callback_data="prog_done")])
+    rows.append([InlineKeyboardButton("Готово", callback_data="prog_done")])
     return InlineKeyboardMarkup(rows)
 
 
-# ─── Генерация PPTX ──────────────────────────────────────────────────────────
-
-def fix_textbox13(xml_str: str, new_address: str) -> str:
-    """Заменяет содержимое TextBox 13 (адрес) на чистую строку"""
+def fix_textbox13(xml_str, new_address):
     def replacer(m):
         sp = m.group(0)
         new_para = (
@@ -85,16 +78,13 @@ def fix_textbox13(xml_str: str, new_address: str) -> str:
             f'<a:endParaRPr lang="ru-RU" dirty="0"/></a:p>'
         )
         return re.sub(r'<a:p>.*?</a:p>', new_para, sp, flags=re.DOTALL)
-
     return re.sub(
         r'<p:sp>(?:(?!<p:sp>).)*?name="TextBox 13".*?</p:sp>',
         replacer, xml_str, flags=re.DOTALL
     )
 
 
-def build_slide3(ref_s3: str, date: str, time_: str,
-                 program_lines: str, price_str: str,
-                 is_vyezd: bool = False, address: str = "") -> str:
+def build_slide3(ref_s3, date, time_, program_lines, price_str, is_vyezd=False, address=""):
     s3 = ref_s3
     s3 = re.sub(
         r'Дата: [^<|]+\|[^<]+Время: [^<]+',
@@ -103,19 +93,16 @@ def build_slide3(ref_s3: str, date: str, time_: str,
     old_prog = re.search(r'\d\) .+?(?=</a:t>)', s3, re.DOTALL)
     if old_prog:
         s3 = s3.replace(old_prog.group(0), program_lines)
-
     if is_vyezd:
         s3 = re.sub(r'[\d\s]+ руб/чел', f'{price_str} руб (общая стоимость)', s3)
     else:
         s3 = re.sub(r'[\d\s]+ руб/чел', f'{price_str} руб/чел', s3)
-
     addr = address if is_vyezd else 'Денисовский переулок 30, стр. 1'
     s3 = fix_textbox13(s3, addr)
     return s3
 
 
-def make_genitive(name: str) -> str:
-    """Простое склонение имени в родительный падеж"""
+def make_genitive(name):
     n = name.strip()
     low = n.lower()
     if low.endswith('ия'): return n[:-2] + 'ии'
@@ -127,8 +114,7 @@ def make_genitive(name: str) -> str:
     return name
 
 
-def build_pptx(data: dict) -> str:
-    """Создаёт готовый PPTX и возвращает путь к файлу"""
+def build_pptx(data):
     loc = data['location']
     name = data['name']
     name_gen = make_genitive(name)
@@ -139,57 +125,43 @@ def build_pptx(data: dict) -> str:
     address = data.get('address', '')
     is_vyezd = (loc == 'vyezd')
 
-    # Выбираем шаблон
-    template = {
-        'big':   TEMPLATE_BIG,
-        'small': TEMPLATE_SMALL,
-        'vyezd': TEMPLATE_VYEZD,
-    }[loc]
+    template = {'big': TEMPLATE_BIG, 'small': TEMPLATE_SMALL, 'vyezd': TEMPLATE_VYEZD}[loc]
+    loc_label = {'big': 'Большая студия', 'small': 'Малая студия', 'vyezd': 'Выезд'}[loc]
 
-    loc_label = {
-        'big':   'Большая студия',
-        'small': 'Малая студия',
-        'vyezd': 'Выезд',
-    }[loc]
-
-    fname = f"КП_{name}_{date}_{loc_label}.pptx"
+    fname = f"KP_{name}_{date}_{loc_label}.pptx"
     tmp_dir = tempfile.mkdtemp()
     dest_pptx = os.path.join(tmp_dir, fname)
     work_dir = os.path.join(tmp_dir, 'work')
     os.makedirs(work_dir)
 
-    # Распаковываем шаблон
     with zipfile.ZipFile(template, 'r') as z:
         z.extractall(work_dir)
 
-    # Загружаем эталонный слайд 3
     with zipfile.ZipFile(SLIDE3_REF, 'r') as z:
-        ref_s3 = z.read('ppt/slides/slide3.xml').decode('utf-8')
-        ref_s3_rels = z.read('ppt/slides/_rels/slide3.xml.rels').decode('utf-8')
+        ref_s3 = z.read('ppt/slides/slide1.xml').decode('utf-8')
+        ref_s3_rels = z.read('ppt/slides/_rels/slide1.xml.rels').decode('utf-8')
 
-    # Слайд 1: имя клиента
     s1_path = os.path.join(work_dir, 'ppt/slides/slide1.xml')
     with open(s1_path, 'r', encoding='utf-8') as f:
         s1 = f.read()
     s1 = re.sub(r'Программа для [А-Яа-яёЁ]+', f'Программа для {name_gen}', s1)
     if 'Программа для имя' in s1:
         s1 = s1.replace('Программа для имя', f'Программа для {name_gen}')
-    # Исправляем битый тег если есть
-    s1 = re.sub(r'(Программа для [А-Яа-яёЁ]+)(\s*lang=)',
-                r'\1</a:t></a:r><a:r><a:rPr \2', s1)
     with open(s1_path, 'w', encoding='utf-8') as f:
         f.write(s1)
 
-    # Слайд 3: подставляем данные
-    s3_new = build_slide3(ref_s3, date, time_, program_lines, price, is_vyezd, address)
+    with zipfile.ZipFile(SLIDE3_REF, 'r') as z:
+        ref_s3_data = z.read('ppt/slides/slide1.xml').decode('utf-8')
+        ref_s3_rels_data = z.read('ppt/slides/_rels/slide1.xml.rels').decode('utf-8')
+
+    s3_new = build_slide3(ref_s3_data, date, time_, program_lines, price, is_vyezd, address)
     s3_path = os.path.join(work_dir, 'ppt/slides/slide3.xml')
     s3_rels_path = os.path.join(work_dir, 'ppt/slides/_rels/slide3.xml.rels')
     with open(s3_path, 'w', encoding='utf-8') as f:
         f.write(s3_new)
     with open(s3_rels_path, 'w', encoding='utf-8') as f:
-        f.write(ref_s3_rels)
+        f.write(ref_s3_rels_data)
 
-    # Пакуем
     with zipfile.ZipFile(dest_pptx, 'w', zipfile.ZIP_DEFLATED) as z:
         for root, dirs, files in os.walk(work_dir):
             for file in files:
@@ -199,11 +171,9 @@ def build_pptx(data: dict) -> str:
     return dest_pptx
 
 
-# ─── Хэндлеры бота ───────────────────────────────────────────────────────────
-
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Напиши /кп или /kp чтобы создать коммерческое предложение."
+        "Привет! Напиши /kp чтобы создать коммерческое предложение."
     )
 
 
@@ -216,10 +186,7 @@ async def cmd_kp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.strip()
     ctx.user_data['name'] = raw[0].upper() + raw[1:] if raw else raw
-    await update.message.reply_text(
-        "Выбери локацию:",
-        reply_markup=kb_location()
-    )
+    await update.message.reply_text("Выбери локацию:", reply_markup=kb_location())
     return LOCATION
 
 
@@ -228,24 +195,23 @@ async def got_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     loc = query.data.replace('loc_', '')
     ctx.user_data['location'] = loc
-
     if loc == 'vyezd':
         await query.edit_message_text("Укажи адрес выезда:")
         return ADDRESS
     else:
-        await query.edit_message_text("Дата мероприятия? (например: 15.06)")
+        await query.edit_message_text("Дата мероприятия? Например: 15.06")
         return DATE
 
 
 async def got_address(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['address'] = update.message.text.strip()
-    await update.message.reply_text("Дата мероприятия? (например: 15.06)")
+    await update.message.reply_text("Дата мероприятия? Например: 15.06")
     return DATE
 
 
 async def got_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['date'] = update.message.text.strip()
-    await update.message.reply_text("Время начала? (например: 19:00)")
+    await update.message.reply_text("Время начала? Например: 19:00")
     return TIME_
 
 
@@ -254,7 +220,7 @@ async def got_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['selected'] = {}
     ctx.user_data['dur_mode'] = None
     await update.message.reply_text(
-        "Выбери блоки программы.\n⏱ рядом с блоком — изменить длительность.",
+        "Выбери блоки программы. Кнопка 'время' меняет длительность блока.",
         reply_markup=kb_program(ctx.user_data['selected'])
     )
     return PROGRAM
@@ -279,7 +245,8 @@ async def program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data['dur_mode'] = data[8:]
 
     elif data.startswith('dur_'):
-        _, bid, chosen = data.split('_', 2)
+        parts = data.split('_', 2)
+        bid, chosen = parts[1], parts[2]
         sel[bid] = chosen
         ctx.user_data['dur_mode'] = None
 
@@ -291,7 +258,9 @@ async def program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return PROGRAM
         ctx.user_data['selected'] = sel
-        await query.edit_message_text("Стоимость? (руб/чел для студии или общая для выезда)")
+        await query.edit_message_text(
+            "Стоимость?\nДля студии: рублей с человека\nДля выезда: общая сумма"
+        )
         return PRICE
 
     await query.edit_message_reply_markup(
@@ -309,18 +278,16 @@ async def got_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         price = raw
     ctx.user_data['price'] = price
 
-    # Собираем программу
     sel = ctx.user_data['selected']
     n = 1
     lines = []
     for bid, bname, bdefault, has_dur in PROGRAM_BLOCKS:
         if bid in sel:
             dur = sel[bid]
-            lines.append(f"{n}) {bname} — {dur}")
+            lines.append(f"{n}) {bname} - {dur}")
             n += 1
     ctx.user_data['program_lines'] = '\n'.join(lines)
 
-    # Показываем итог
     loc_labels = {'big': 'Большая студия', 'small': 'Малая студия', 'vyezd': 'Выезд'}
     loc = loc_labels[ctx.user_data['location']]
     addr = ctx.user_data.get('address', 'Денисовский переулок 30, стр. 1')
@@ -340,8 +307,8 @@ async def got_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         summary,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Всё верно — создать КП", callback_data="confirm_yes")],
-            [InlineKeyboardButton("❌ Начать заново", callback_data="confirm_no")],
+            [InlineKeyboardButton("Верно — создать КП", callback_data="confirm_yes")],
+            [InlineKeyboardButton("Начать заново",      callback_data="confirm_no")],
         ])
     )
     return CONFIRM
@@ -352,7 +319,7 @@ async def confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == 'confirm_no':
-        await query.edit_message_text("Начинаем заново. Напиши /кп")
+        await query.edit_message_text("Начинаем заново. Напиши /kp")
         return ConversationHandler.END
 
     await query.edit_message_text("Готовлю КП...")
@@ -363,17 +330,15 @@ async def confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_document(document=f, filename=fname)
         shutil.rmtree(os.path.dirname(path), ignore_errors=True)
     except Exception as e:
-        await query.message.reply_text(f"Ошибка: {e}")
+        await query.message.reply_text(f"Ошибка при генерации: {e}")
 
     return ConversationHandler.END
 
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отменено. Напиши /кп чтобы начать.")
+    await update.message.reply_text("Отменено. Напиши /kp чтобы начать заново.")
     return ConversationHandler.END
 
-
-# ─── Запуск ──────────────────────────────────────────────────────────────────
 
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -398,7 +363,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv)
 
-    print("Бот запущен...")
+    print("Bot started...")
     app.run_polling()
 
 
