@@ -170,7 +170,7 @@ def build_pptx(data):
     s3 = replace_shape_text(s3, 'TextBox_new_51', f'Дата: {date}  |  Время: {time_}', sz="1600")
     s3 = replace_shape_text(s3, 'TextBox_new_54', program_lines, sz="1600")
     price_label = f'{price} руб (общая стоимость)' if is_vyezd else f'{price} руб/чел'
-    s3 = replace_shape_text(s3, 'TextBox_new_55', price_label, sz="3200")
+    s3 = replace_shape_text(s3, 'TextBox_new_55', price_label, sz="1600")
     addr = address if is_vyezd else 'Денисовский переулок 30, стр. 1'
     s3 = replace_shape_text(s3, 'TextBox 13', addr, sz="1600")
 
