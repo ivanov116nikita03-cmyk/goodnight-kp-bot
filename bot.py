@@ -1,4 +1,5 @@
 import os
+from generate_kp import make_kp_pdf
 import re
 import zipfile
 import shutil
@@ -276,7 +277,7 @@ def kb_doc_confirm():
 
 # ─── Генерация файлов ─────────────────────────────────────────────────────────
 
-def replace_shape_text(xml_str, shape_name, new_text, sz="1600"):
+def replace_shape_text(xml_str, shape_name, new_text, sz="2400"):
     def replacer(m):
         sp = m.group(0)
         para = (
@@ -728,7 +729,14 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     await q.edit_message_text("Готовлю КП...")
     try:
-        path, fname, tmp_dir = build_kp(ctx.user_data)
+        d = ctx.user_data
+        loc = d['location']
+        name_gen = make_genitive(d['name'])
+        path, fname, tmp_dir = make_kp_pdf(
+            loc, name_gen, d['date'], d['time'],
+            d['program_lines'], d['price'],
+            d.get('address', '')
+        )
         with open(path, 'rb') as f:
             await q.message.reply_document(document=f, filename=fname)
         shutil.rmtree(tmp_dir, ignore_errors=True)
