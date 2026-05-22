@@ -391,7 +391,16 @@ def build_docs(data):
     # ─── ДОГОВОР (docx) ───
     work_dir = os.path.join(tmp_dir, 'dogovor_work')
     os.makedirs(work_dir)
-    with zipfile.ZipFile(TEMPLATE_DOGOVOR, 'r') as z:
+    # Конвертируем .doc в .docx если нужно
+    dogovor_src = TEMPLATE_DOGOVOR
+    if TEMPLATE_DOGOVOR.endswith('.doc') and not TEMPLATE_DOGOVOR.endswith('.docx'):
+        subprocess.run(['libreoffice', '--headless', '--convert-to', 'docx',
+                       '--outdir', tmp_dir, TEMPLATE_DOGOVOR],
+                      timeout=30, capture_output=True)
+        dogovor_src = os.path.join(tmp_dir, os.path.basename(TEMPLATE_DOGOVOR).replace('.doc', '.docx'))
+    if not os.path.exists(dogovor_src):
+        dogovor_src = TEMPLATE_DOGOVOR
+    with zipfile.ZipFile(dogovor_src, 'r') as z:
         z.extractall(work_dir)
 
     doc_xml_path = os.path.join(work_dir, 'word/document.xml')
@@ -486,7 +495,15 @@ def build_docs(data):
     # ─── АКТ (docx → pdf) ───
     work_dir3 = os.path.join(tmp_dir, 'akt_work')
     os.makedirs(work_dir3)
-    with zipfile.ZipFile(TEMPLATE_AKT, 'r') as z:
+    akt_src = TEMPLATE_AKT
+    if TEMPLATE_AKT.endswith('.doc') and not TEMPLATE_AKT.endswith('.docx'):
+        subprocess.run(['libreoffice', '--headless', '--convert-to', 'docx',
+                       '--outdir', tmp_dir, TEMPLATE_AKT],
+                      timeout=30, capture_output=True)
+        akt_src = os.path.join(tmp_dir, os.path.basename(TEMPLATE_AKT).replace('.doc', '.docx'))
+    if not os.path.exists(akt_src):
+        akt_src = TEMPLATE_AKT
+    with zipfile.ZipFile(akt_src, 'r') as z:
         z.extractall(work_dir3)
 
     akt_xml = os.path.join(work_dir3, 'word/document.xml')
@@ -892,10 +909,18 @@ async def cancel_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+
+async def cmd_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
+    await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
+    msg = await update.message.reply_text("Раздел документов:", reply_markup=kb_docs())
+    track(ctx, msg.message_id)
+
 async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("start",  "Главное меню"),
         BotCommand("kp",     "Создать КП"),
+        BotCommand("docs",   "Документы"),
         BotCommand("cancel", "Отменить"),
     ])
 
@@ -946,6 +971,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("docs", cmd_docs))
     app.add_handler(CallbackQueryHandler(menu_cb, pattern=r'^(menu_docs|menu_back)$'))
     app.add_handler(kp_conv)
     app.add_handler(doc_conv)
