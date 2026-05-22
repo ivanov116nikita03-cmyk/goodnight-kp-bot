@@ -38,6 +38,8 @@ ISPOLNITEL = {
  KP_FMT, KP_PROG, KP_PRICE, KP_CONFIRM) = range(9)
 
 # Состояния документов
+# ФИХ 3: добавлен DOC_MENU = 10 чтобы /docs был entry_point doc_conv
+DOC_MENU = 10
 (DOC_NUM, DOC_DATE_EVENT, DOC_TIME, DOC_DUR, DOC_ADDR,
  DOC_PRICE, DOC_PAY_DATE, DOC_CARD_CHOICE, DOC_CARD,
  DOC_DIRECTOR, DOC_CONFIRM) = range(11, 22)
@@ -62,7 +64,7 @@ BASE_DUR = {
 }
 
 
-# ─── Утилиты ─────────────────────────────────────────────────────────────────
+# Утилиты
 
 async def safe_delete(bot, chat_id, message_id):
     try:
@@ -142,13 +144,11 @@ def make_genitive(name):
     """Склонение имени в родительный падеж"""
     n = name.strip()
     low = n.lower()
-    # Популярные мужские имена на согласную (не склоняются в -а/-я форме)
     male_names = ['никита', 'андрей', 'алексей', 'сергей', 'дмитрий', 'максим',
                   'артём', 'артем', 'иван', 'михаил', 'александр', 'владимир',
                   'кирилл', 'роман', 'денис', 'евгений', 'игорь', 'олег',
                   'антон', 'виктор', 'геннадий', 'константин', 'юрий', 'павел',
                   'тимур', 'руслан', 'марат', 'данил', 'данила', 'дандар', 'гэсэр']
-    # Правила
     if low.endswith('ия'): return n[:-2] + 'ии'
     if low.endswith('ья'): return n[:-2] + 'ьи'
     if low.endswith('ея'): return n[:-2] + 'еи'
@@ -158,11 +158,9 @@ def make_genitive(name):
             return n[:-1] + 'и'
         return n[:-1] + 'ы'
     if low.endswith('ь'):  return n[:-1] + 'и'
-    # Мужские имена на согласную — добавляем -а
     for mn in male_names:
         if low == mn:
             return n + 'а'
-    # По умолчанию — добавляем -а если заканчивается на согласную
     vowels = 'аеёиоуыэюяaeiouy'
     if low and low[-1] not in vowels:
         return n + 'а'
@@ -197,7 +195,7 @@ def parse_card(text):
     return data
 
 
-# ─── Клавиатуры ──────────────────────────────────────────────────────────────
+# Клавиатуры
 
 def kb_main():
     return InlineKeyboardMarkup([
@@ -275,7 +273,7 @@ def kb_doc_confirm():
     ])
 
 
-# ─── Генерация файлов ─────────────────────────────────────────────────────────
+# Генерация файлов
 
 def replace_shape_text(xml_str, shape_name, new_text, sz="2400"):
     def replacer(m):
@@ -331,13 +329,11 @@ def build_kp(data):
     with zipfile.ZipFile(template, 'r') as z:
         z.extractall(work_dir)
 
-    # Слайд 1
     s1 = open(os.path.join(work_dir, 'ppt/slides/slide1.xml'), encoding='utf-8').read()
     s1 = re.sub(r'Программа для [А-Яа-яёЁ]+', f'Программа для {name_gen}', s1)
     s1 = s1.replace('Программа для имя', f'Программа для {name_gen}')
     open(os.path.join(work_dir, 'ppt/slides/slide1.xml'), 'w', encoding='utf-8').write(s1)
 
-    # Слайд 3 — все поля 24pt
     s3 = open(os.path.join(work_dir, 'ppt/slides/slide3.xml'), encoding='utf-8').read()
     s3 = replace_shape_text(s3, 'TextBox_new_51', f'Дата: {date_str}  |  Время: {time_str}')
     s3 = replace_shape_text(s3, 'TextBox_new_54', prog)
@@ -353,7 +349,6 @@ def build_kp(data):
                 fp = os.path.join(root, file)
                 z.write(fp, os.path.relpath(fp, work_dir))
 
-    # Конвертируем в PDF
     pdf = convert_to_pdf(pptx_path, tmp_dir)
     if pdf:
         return pdf, fname_base + ".pdf", tmp_dir
@@ -382,16 +377,16 @@ def build_docs(data):
     duration = data['duration']
     address = data['address']
     price = data['price']
-    pay_date = data['pay_date']
+    # ФИХ 1: было data['pay_date'] — KeyError, поле хранится как 'today'
+    pay_date = data.get('today', '')
     price_words = num_to_words(price.replace(' ', ''))
 
     tmp_dir = tempfile.mkdtemp()
     results = []
 
-    # ─── ДОГОВОР (docx) ───
+    # ДОГОВОР (docx)
     work_dir = os.path.join(tmp_dir, 'dogovor_work')
     os.makedirs(work_dir)
-    # Конвертируем .doc в .docx если нужно
     dogovor_src = TEMPLATE_DOGOVOR
     if TEMPLATE_DOGOVOR.endswith('.doc') and not TEMPLATE_DOGOVOR.endswith('.docx'):
         subprocess.run(['libreoffice', '--headless', '--convert-to', 'docx',
@@ -407,9 +402,7 @@ def build_docs(data):
     with open(doc_xml_path, encoding='utf-8') as f:
         xml = f.read()
 
-    # Убираем жёлтые выделения
     xml = xml.replace('<w:highlight w:val="yellow"/>', '')
-    # Замены переменных
     replacements_doc = [
         ('136', doc_num),
         ('сентября 2025', _month_year(today)),
@@ -446,7 +439,7 @@ def build_docs(data):
                 z.write(fp, os.path.relpath(fp, work_dir))
     results.append((dogovor_path, f'Договор_{doc_num}.docx'))
 
-    # ─── СЧЁТ (docx → pdf) ───
+    # СЧЁТ (docx → pdf)
     work_dir2 = os.path.join(tmp_dir, 'schet_work')
     os.makedirs(work_dir2)
     with zipfile.ZipFile(TEMPLATE_SCHET, 'r') as z:
@@ -492,7 +485,7 @@ def build_docs(data):
     else:
         results.append((schet_docx, f'Счёт_{doc_num}.docx'))
 
-    # ─── АКТ (docx → pdf) ───
+    # АКТ (docx → pdf)
     work_dir3 = os.path.join(tmp_dir, 'akt_work')
     os.makedirs(work_dir3)
     akt_src = TEMPLATE_AKT
@@ -586,7 +579,7 @@ def _initials(fio):
     return fio
 
 
-# ─── КП Handlers ─────────────────────────────────────────────────────────────
+# КП Handlers
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
@@ -599,9 +592,13 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if query.data == "menu_kp":
         ctx.user_data.clear()
         await query.edit_message_text("Как зовут клиента?")
+        # ФИХ 2: трекаем сообщение "Как зовут клиента?" чтобы оно удалилось в конце
+        track(ctx, query.message.message_id)
         return KP_NAME
     elif query.data == "menu_docs":
         await query.edit_message_text("Раздел документов:", reply_markup=kb_docs())
+        track(ctx, query.message.message_id)
+        return DOC_MENU
     elif query.data == "menu_all_docs":
         ctx.user_data.clear()
         await query.edit_message_text("Номер договора (например: 11):")
@@ -618,7 +615,10 @@ async def cmd_kp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def kp_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['name'] = update.message.text.strip().capitalize()
-    track(ctx, update.message.message_id)
+    # ФИХ 2: сразу пытаемся удалить сообщение пользователя с именем
+    # В личном чате Telegram не позволяет удалять чужие сообщения — safe_delete молча игнорирует
+    # В группе с правами администратора сообщение будет удалено
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Выбери локацию:", reply_markup=kb_location())
     track(ctx, msg.message_id)
     return KP_LOC
@@ -639,21 +639,21 @@ async def kp_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def kp_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['address'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Дата мероприятия? (например: 15.06.2026)")
     track(ctx, msg.message_id)
     return KP_DATE
 
 async def kp_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['date'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Время начала?")
     track(ctx, msg.message_id)
     return KP_TIME
 
 async def kp_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['time'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     if ctx.user_data['location'] == 'vyezd':
         ctx.user_data['fmt'] = 'free'
         ctx.user_data['selected'] = {}
@@ -714,7 +714,7 @@ async def kp_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         price = f"{int(''.join(filter(str.isdigit, raw))):,}".replace(',', ' ')
     except: price = raw
     ctx.user_data['price'] = price
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
 
     sel = ctx.user_data['selected']
     fmt = ctx.user_data.get('fmt', 'free')
@@ -764,39 +764,47 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ─── Документы Handlers ───────────────────────────────────────────────────────
+# Документы Handlers
+
+# ФИХ 3: cmd_docs теперь возвращает DOC_MENU и является entry_point для doc_conv
+async def cmd_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
+    await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
+    msg = await update.message.reply_text("Раздел документов:", reply_markup=kb_docs())
+    track(ctx, msg.message_id)
+    return DOC_MENU
 
 async def doc_num(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['doc_num'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Дата мероприятия? (например: 23.05.2026)")
     track(ctx, msg.message_id)
     return DOC_DATE_EVENT
 
 async def doc_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['date_event'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Время мероприятия? (например: 19:00 — 20:30)")
     track(ctx, msg.message_id)
     return DOC_TIME
 
 async def doc_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['time_event'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Длительность? (например: 1,5 часа)")
     track(ctx, msg.message_id)
     return DOC_DUR
 
 async def doc_dur(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['duration'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Адрес проведения:")
     track(ctx, msg.message_id)
     return DOC_ADDR
 
 async def doc_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['address'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Стоимость (рублей, цифрами):")
     track(ctx, msg.message_id)
     return DOC_PRICE
@@ -807,7 +815,7 @@ async def doc_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data['price'] = f"{int(''.join(filter(str.isdigit, raw))):,}".replace(',', ' ')
     except:
         ctx.user_data['price'] = raw
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text(
         f"Сегодняшняя дата (для счёта)? Сегодня: {date.today().strftime('%d.%m.%Y')}"
     )
@@ -816,7 +824,7 @@ async def doc_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def doc_pay_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['today'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text(
         "Карточка предприятия заказчика:",
         reply_markup=kb_card_choice()
@@ -840,7 +848,7 @@ async def doc_card_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def doc_card_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     ctx.user_data['card'] = parse_card(text)
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("ФИО генерального директора заказчика (полностью):")
     track(ctx, msg.message_id)
     return DOC_DIRECTOR
@@ -853,14 +861,14 @@ async def doc_card_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text = f.read()
     os.remove(tmp)
     ctx.user_data['card'] = parse_card(text)
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("ФИО генерального директора заказчика (полностью):")
     track(ctx, msg.message_id)
     return DOC_DIRECTOR
 
 async def doc_director(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['director'] = update.message.text.strip()
-    track(ctx, update.message.message_id)
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
 
     card = ctx.user_data.get('card', {})
     summary = (
@@ -909,13 +917,6 @@ async def cancel_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-
-async def cmd_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data.clear()
-    await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
-    msg = await update.message.reply_text("Раздел документов:", reply_markup=kb_docs())
-    track(ctx, msg.message_id)
-
 async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("start",  "Главное меню"),
@@ -947,11 +948,19 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_handler)],
     )
 
+    # ФИХ 3: doc_conv теперь включает:
+    # - CommandHandler("docs", cmd_docs) как entry_point
+    # - DOC_MENU как первое состояние (меню с кнопками)
+    # - menu_cb обрабатывает переходы внутри конверсации
     doc_conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(menu_cb, pattern=r'^menu_all_docs$'),
+            CommandHandler("docs", cmd_docs),
+            CallbackQueryHandler(menu_cb, pattern=r'^menu_docs$'),
         ],
         states={
+            DOC_MENU: [
+                CallbackQueryHandler(menu_cb, pattern=r'^(menu_all_docs|menu_back|cancel)$'),
+            ],
             DOC_NUM:         [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_num)],
             DOC_DATE_EVENT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_date)],
             DOC_TIME:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_time)],
@@ -971,10 +980,11 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("docs", cmd_docs))
-    app.add_handler(CallbackQueryHandler(menu_cb, pattern=r'^(menu_docs|menu_back)$'))
+    # Кнопка "Документы" из главного меню теперь обрабатывается внутри doc_conv
     app.add_handler(kp_conv)
     app.add_handler(doc_conv)
+    # Кнопка "Назад" из меню документов (вне активной конверсации)
+    app.add_handler(CallbackQueryHandler(menu_cb, pattern=r'^menu_back$'))
 
     print("Bot started...")
     app.run_polling()
