@@ -357,6 +357,25 @@ def build_kp(data):
 def docx_replace(xml, old, new):
     return xml.replace(old, new)
 
+def ensure_docx(template_path, tmp_dir):
+    """Гарантирует что файл — валидный docx (zip). Если .doc — конвертирует через LibreOffice."""
+    if not os.path.exists(template_path):
+        raise FileNotFoundError(f"Шаблон не найден: {template_path}")
+    try:
+        with zipfile.ZipFile(template_path, 'r'):
+            pass
+        return template_path
+    except zipfile.BadZipFile:
+        result = subprocess.run(
+            ['libreoffice', '--headless', '--convert-to', 'docx', '--outdir', tmp_dir, template_path],
+            timeout=60, capture_output=True
+        )
+        base = os.path.splitext(os.path.basename(template_path))[0]
+        converted = os.path.join(tmp_dir, base + '.docx')
+        if os.path.exists(converted):
+            return converted
+        raise Exception(f"Не удалось конвертировать {template_path}: {result.stderr.decode()}")
+
 def build_docs(data):
     """Генерирует договор (docx), счёт (pdf), акт (pdf)"""
     card = data['card']
@@ -387,14 +406,7 @@ def build_docs(data):
     # ДОГОВОР (docx)
     work_dir = os.path.join(tmp_dir, 'dogovor_work')
     os.makedirs(work_dir)
-    dogovor_src = TEMPLATE_DOGOVOR
-    if TEMPLATE_DOGOVOR.endswith('.doc') and not TEMPLATE_DOGOVOR.endswith('.docx'):
-        subprocess.run(['libreoffice', '--headless', '--convert-to', 'docx',
-                       '--outdir', tmp_dir, TEMPLATE_DOGOVOR],
-                      timeout=30, capture_output=True)
-        dogovor_src = os.path.join(tmp_dir, os.path.basename(TEMPLATE_DOGOVOR).replace('.doc', '.docx'))
-    if not os.path.exists(dogovor_src):
-        dogovor_src = TEMPLATE_DOGOVOR
+    dogovor_src = ensure_docx(TEMPLATE_DOGOVOR, tmp_dir)
     with zipfile.ZipFile(dogovor_src, 'r') as z:
         z.extractall(work_dir)
 
@@ -488,14 +500,7 @@ def build_docs(data):
     # АКТ (docx → pdf)
     work_dir3 = os.path.join(tmp_dir, 'akt_work')
     os.makedirs(work_dir3)
-    akt_src = TEMPLATE_AKT
-    if TEMPLATE_AKT.endswith('.doc') and not TEMPLATE_AKT.endswith('.docx'):
-        subprocess.run(['libreoffice', '--headless', '--convert-to', 'docx',
-                       '--outdir', tmp_dir, TEMPLATE_AKT],
-                      timeout=30, capture_output=True)
-        akt_src = os.path.join(tmp_dir, os.path.basename(TEMPLATE_AKT).replace('.doc', '.docx'))
-    if not os.path.exists(akt_src):
-        akt_src = TEMPLATE_AKT
+    akt_src = ensure_docx(TEMPLATE_AKT, tmp_dir)
     with zipfile.ZipFile(akt_src, 'r') as z:
         z.extractall(work_dir3)
 
