@@ -376,6 +376,13 @@ def ensure_docx(template_path, tmp_dir):
             return converted
         raise Exception(f"Не удалось конвертировать {template_path}: {result.stderr.decode()}")
 
+def find_doc_xml(work_dir):
+    """Ищет document.xml в любом месте внутри распакованного docx"""
+    for root, dirs, files in os.walk(work_dir):
+        if 'document.xml' in files:
+            return os.path.join(root, 'document.xml')
+    raise FileNotFoundError(f"document.xml не найден в {work_dir}")
+
 def build_docs(data):
     """Генерирует договор (docx), счёт (pdf), акт (pdf)"""
     card = data['card']
@@ -410,7 +417,7 @@ def build_docs(data):
     with zipfile.ZipFile(dogovor_src, 'r') as z:
         z.extractall(work_dir)
 
-    doc_xml_path = os.path.join(work_dir, 'word/document.xml')
+    doc_xml_path = find_doc_xml(work_dir)
     with open(doc_xml_path, encoding='utf-8') as f:
         xml = f.read()
 
@@ -457,7 +464,7 @@ def build_docs(data):
     with zipfile.ZipFile(TEMPLATE_SCHET, 'r') as z:
         z.extractall(work_dir2)
 
-    schet_xml = os.path.join(work_dir2, 'word/document.xml')
+    schet_xml = find_doc_xml(work_dir2)
     with open(schet_xml, encoding='utf-8') as f:
         xml2 = f.read()
 
@@ -504,7 +511,7 @@ def build_docs(data):
     with zipfile.ZipFile(akt_src, 'r') as z:
         z.extractall(work_dir3)
 
-    akt_xml = os.path.join(work_dir3, 'word/document.xml')
+    akt_xml = find_doc_xml(work_dir3)
     with open(akt_xml, encoding='utf-8') as f:
         xml3 = f.read()
 
