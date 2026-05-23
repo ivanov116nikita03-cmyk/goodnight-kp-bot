@@ -18,9 +18,9 @@ TOKEN = os.environ.get("BOT_TOKEN", "")
 TEMPLATE_BIG   = "template_big.pptx"
 TEMPLATE_SMALL = "template_small.pptx"
 TEMPLATE_VYEZD = "template_vyezd.pptx"
-TEMPLATE_DOGOVOR = "template_dogovor.doc"
+TEMPLATE_DOGOVOR = "template_dogovor.docx"
 TEMPLATE_SCHET   = "template_schet.docx"
-TEMPLATE_AKT     = "template_akt.doc"
+TEMPLATE_AKT     = "template_akt.docx"
 
 # Реквизиты исполнителя (фиксированные)
 ISPOLNITEL = {
