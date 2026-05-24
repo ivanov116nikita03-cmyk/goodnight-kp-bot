@@ -6,6 +6,8 @@ import shutil
 import tempfile
 import subprocess
 from datetime import date
+from docx import Document as DocxDocument
+from docx.text.paragraph import Paragraph as DocxParagraph
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -18,8 +20,8 @@ TOKEN = os.environ.get("BOT_TOKEN", "")
 TEMPLATE_BIG   = "template_big.pptx"
 TEMPLATE_SMALL = "template_small.pptx"
 TEMPLATE_VYEZD = "template_vyezd.pptx"
-TEMPLATE_DOGOVOR = "template_dogovor.docx"
-TEMPLATE_SCHET   = "template_schet.docx"
+TEMPLATE_DOGOVOR = "template_dogovor_new.docx"
+TEMPLATE_SCHET   = "template_schet_new.docx"
 TEMPLATE_AKT     = "template_akt.docx"
 
 # Реквизиты исполнителя (фиксированные)
@@ -38,11 +40,10 @@ ISPOLNITEL = {
  KP_FMT, KP_PROG, KP_PRICE, KP_CONFIRM) = range(9)
 
 # Состояния документов
-# ФИХ 3: добавлен DOC_MENU = 10 чтобы /docs был entry_point doc_conv
-DOC_MENU = 10
-(DOC_NUM, DOC_DATE_EVENT, DOC_TIME, DOC_DUR, DOC_ADDR,
+DOC_MENU = 10  # menu /docs
+(DOC_NUM, DOC_DATE_EVENT, DOC_TIME, DOC_ADDR,
  DOC_PRICE, DOC_PAY_DATE, DOC_CARD_CHOICE, DOC_CARD,
- DOC_DIRECTOR, DOC_CONFIRM) = range(11, 22)
+ DOC_DIRECTOR, DOC_CONFIRM) = range(11, 21)  # DOC_DUR убран — считается автоматически
 
 FIXED_DUR = {"velkom": "20 мин", "break_": "10 мин"}
 PROGRAM_BLOCKS = [
@@ -167,31 +168,80 @@ def make_genitive(name):
     return name
 
 def parse_card(text):
-    """Парсит карточку предприятия из текста"""
+    """Парсит карточку предприятия из текста.
+    Обрабатывает как txt-файлы, так и вставленный текст.
+    Работает даже без пробелов между метками и значениями."""
     data = {}
-    patterns = {
-        'name':      r'(?:ООО|ОАО|ЗАО|АО|ИП|ОБЩЕСТВО[^,\n]*)[^\n]*',
-        'ogrn':      r'ОГРН[:\s]*(\d+)',
-        'inn':       r'ИНН[:\s]*(\d+)',
-        'kpp':       r'КПП[:\s]*(\d+)',
-        'bank':      r'(?:Банк|БАНК)[:\s]*([^\n,]+)',
-        'bik':       r'БИК[:\s]*(\d+)',
-        'ks':        r'[кК]/[сС][:\s№]*(\d+)',
-        'rs':        r'(?:Сч\.|счёт|счет|р/с)[:\s№]*(\d+)',
-        'director':  r'(?:директор|Директор|ДИРЕКТОР)[^\n]*?([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
-    }
-    lines = text.strip().split('\n')
-    for line in lines[:3]:
-        line = line.strip()
-        if re.match(r'(ООО|ОАО|ЗАО|АО|ИП)\s', line, re.I):
-            data['name'] = line
-            break
-    for key, pattern in patterns.items():
-        if key == 'name':
-            continue
-        m = re.search(pattern, text, re.I)
+    t = text.strip()
+
+    # Название организации
+    m = re.search(r'((?:ООО|ОАО|ЗАО|АО|ИП)\s*[«"]?[А-ЯЁA-Za-z«"][^»"\n]{1,80}[»"]?)', t, re.I)
+    if m:
+        data['name'] = m.group(1).strip().rstrip(',. ')
+
+    # ИНН (10 или 12 цифр)
+    m = re.search(r'ИНН\D{0,3}(\d{10,12})', t, re.I)
+    if m:
+        data['inn'] = m.group(1)
+
+    # КПП (9 цифр)
+    m = re.search(r'КПП\D{0,3}(\d{9})', t, re.I)
+    if m:
+        data['kpp'] = m.group(1)
+
+    # ОГРН (13 или 15 цифр)
+    m = re.search(r'ОГРН\D{0,5}(\d{13,15})', t, re.I)
+    if m:
+        data['ogrn'] = m.group(1)
+
+    # БИК (9 цифр)
+    m = re.search(r'БИК\D{0,3}(\d{9})', t, re.I)
+    if m:
+        data['bik'] = m.group(1)
+
+    # Расчётный счёт (20 цифр)
+    m = re.search(r'(?:расчетный\s+счет|р/?с|р\.\s*сч|Сч\.)\D{0,5}(\d{20})', t, re.I)
+    if m:
+        data['rs'] = m.group(1)
+
+    # Корреспондентский счёт (20 цифр)
+    m = re.search(r'(?:к/?с|корр\w*)\D{0,5}(\d{20})', t, re.I)
+    if m:
+        data['ks'] = m.group(1)
+
+    # Банк — сначала по метке, потом по вхождению слова банк
+    m = re.search(r'(?:Наименование\s+банка|Банк\s+получателя)\s*[:\n]?\s*(.+?)(?:\n|БИК|$)', t, re.I | re.DOTALL)
+    if m:
+        data['bank'] = m.group(1).strip()[:100]
+    else:
+        m = re.search(r'([^\n]*[Бб]анк[^\n]{3,80})', t)
         if m:
-            data[key] = m.group(1).strip() if m.lastindex else m.group(0).strip()
+            data['bank'] = m.group(1).strip()[:100]
+
+    # Генеральный директор — несколько паттернов, включая без пробела и следующую строку
+    for pat in [
+        r'(?:Генеральный\s+директор|Ген\.?\s*дир\.?)\s*[:/\n]?\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
+        r'(?:Генеральный\s+директор|Ген\.?\s*дир\.?)([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
+        r'(?:Генеральный\s+директор|Директор)[^\n]*\n\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?)',
+        r'(?:Директор|директор)\s*/[^/]*/\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
+        r'(?:^|\n)\s*Директор\s+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
+    ]:
+        m = re.search(pat, t, re.I | re.MULTILINE)
+        if m:
+            data['director'] = m.group(1).strip()
+            break
+
+    # Адрес (юридический или фактический)
+    for addr_pat in [
+        r'(?:Юридический\s+адрес|Юр\.?\s*адрес)[:\s]+([^\n]{10,120})',
+        r'(?:^|\n)\s*Адрес[:\s]+([^\n]{10,120})',
+        r'(\d{6},?\s*(?:г\.|город|г)\s*[А-ЯЁ][а-яё]+[^\n]{5,100})',
+    ]:
+        m = re.search(addr_pat, t, re.I | re.MULTILINE)
+        if m:
+            data['address'] = m.group(1).strip().rstrip(',. ')
+            break
+
     return data
 
 
@@ -259,10 +309,10 @@ def kb_confirm():
     ])
 
 def kb_card_choice():
+    # Только текст — .doc и .txt не поддерживаются (бинарный формат)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📎 Загрузить txt файл", callback_data="card_file")],
-        [InlineKeyboardButton("✏️ Вставить текстом",  callback_data="card_text")],
-        [InlineKeyboardButton("❌ Отмена",            callback_data="cancel")],
+        [InlineKeyboardButton("✏️ Вставить текст карточки", callback_data="card_text")],
+        [InlineKeyboardButton("❌ Отмена",                  callback_data="cancel")],
     ])
 
 def kb_doc_confirm():
@@ -305,6 +355,81 @@ def convert_to_pdf(src_path, tmp_dir):
         return pdf if os.path.exists(pdf) else None
     except Exception:
         return None
+
+
+def normalize_docx_xml(xml):
+    """Объединяет текст всех w:t элементов в первый внутри каждого w:p.
+    Это позволяет надёжно делать str.replace даже если текст разбит по разным runs."""
+    t_re = re.compile(r'<w:t(\s[^>]*)?>(.*?)</w:t>', re.DOTALL)
+    result = []
+    pos = 0
+    search_from = 0
+    para_re = re.compile(r'<w:p[ >]')
+    end_re   = re.compile(r'</w:p>')
+    while True:
+        ms = para_re.search(xml, search_from)
+        if not ms:
+            break
+        me = end_re.search(xml, ms.end())
+        if not me:
+            break
+        p_start, p_end = ms.start(), me.end()
+        para = xml[p_start:p_end]
+        ts = list(t_re.finditer(para))
+        if len(ts) > 1:
+            combined = ''.join(m.group(2) for m in ts)
+            for i in range(len(ts)-1, -1, -1):
+                m = ts[i]
+                if i == 0:
+                    sp = ' xml:space="preserve"' if combined != combined.strip() or '  ' in combined else ''
+                    nt = f'<w:t{sp}>{combined}</w:t>'
+                else:
+                    nt = '<w:t/>'
+                para = para[:m.start()] + nt + para[m.end():]
+            result.append(xml[pos:p_start])
+            result.append(para)
+            pos = p_end
+        search_from = p_end
+    result.append(xml[pos:])
+    return ''.join(result)
+
+
+def num_to_words_short(price_str):
+    """Число прописью без суффикса 'рублей 00 копеек' — для вставки в скобках."""
+    full = num_to_words(price_str.replace(' ', ''))
+    for sfx in [' рублей 00 копеек', ' рублей', ' 00 копеек']:
+        if full.endswith(sfx):
+            return full[:-len(sfx)]
+    return full
+
+
+def calc_duration(time_str):
+    """Считает продолжительность из строки вида '12:00-22:00' или '12:00 — 20:30'."""
+    times = re.findall(r'(\d{1,2}):(\d{2})', time_str)
+    if len(times) >= 2:
+        start = int(times[0][0]) * 60 + int(times[0][1])
+        end   = int(times[1][0]) * 60 + int(times[1][1])
+        diff  = end - start
+        if diff > 0:
+            h, m = diff // 60, diff % 60
+            if m == 0:
+                sfx = 'час' if h == 1 else 'часа' if h in [2, 3, 4] else 'часов'
+                return f'{h} {sfx}'
+            total = diff / 60
+            sfx = 'часа' if total < 5 else 'часов'
+            return f'{total:.1f} {sfx}'.replace('.', ',')
+    return None
+
+
+def _date_word(date_str):
+    """'23.06.2026' → '23 июня 2026'"""
+    months = ['','января','февраля','марта','апреля','мая','июня',
+              'июля','августа','сентября','октября','ноября','декабря']
+    try:
+        d, mo, y = date_str.split('.')
+        return f'{int(d)} {months[int(mo)]} {y}'
+    except:
+        return date_str
 
 def build_kp(data):
     loc = data['location']
@@ -383,170 +508,156 @@ def find_doc_xml(work_dir):
             return os.path.join(root, 'document.xml')
     raise FileNotFoundError(f"document.xml не найден в {work_dir}")
 
-def build_docs(data):
-    """Генерирует договор (docx), счёт (pdf), акт (pdf)"""
-    card = data['card']
-    company_name = card.get('name', 'Заказчик')
-    inn = card.get('inn', '')
-    kpp = card.get('kpp', '')
-    ogrn = card.get('ogrn', '')
-    bank_zak = card.get('bank', '')
-    bik_zak = card.get('bik', '')
-    ks_zak = card.get('ks', '')
-    rs_zak = card.get('rs', '')
-    director = data.get('director', 'Директор')
 
-    doc_num = data['doc_num']
-    today = data['today']
+def _apply_replacements(body, pairs):
+    """Применяет замены во всех параграфах, включая вложенные таблицы.
+    Объединяет все runs параграфа, делает замену, кладёт в первый run."""
+    for child in body:
+        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+        if tag == 'p':
+            para = DocxParagraph(child, body)
+            full = ''.join(r.text for r in para.runs)
+            nw = full
+            for old, new in pairs:
+                if old:
+                    nw = nw.replace(old, new)
+            if nw != full and para.runs:
+                para.runs[0].text = nw
+                for r in para.runs[1:]:
+                    r.text = ''
+        elif tag in ('tbl', 'tr', 'tc', 'body'):
+            _apply_replacements(child, pairs)
+
+def build_docs(data):
+    """Генерирует договор, счёт и акт используя python-docx с [[МАРКЕРАМИ]]."""
+    card         = data.get('card', {})
+    company_name = card.get('name', '')
+    inn          = card.get('inn', '')
+    kpp          = card.get('kpp', '')
+    ogrn         = card.get('ogrn', '')
+    bik_zak      = card.get('bik', '')
+    ks_zak       = card.get('ks', '')
+    rs_zak       = card.get('rs', '')
+    address_zak  = card.get('address', '')
+    director     = data.get('director', '')
+
+    doc_num    = data['doc_num']
+    today      = data.get('today', date.today().strftime('%d.%m.%Y'))
     date_event = data['date_event']
     time_event = data['time_event']
-    duration = data['duration']
-    address = data['address']
-    price = data['price']
-    # ФИХ 1: было data['pay_date'] — KeyError, поле хранится как 'today'
-    pay_date = data.get('today', '')
-    price_words = num_to_words(price.replace(' ', ''))
+    duration   = data.get('duration', '—')
+    address    = data['address']
+    price      = data['price']
+
+    price_words       = num_to_words(price.replace(' ', ''))
+    price_short       = num_to_words_short(price)
+    today_day         = today.split('.')[0]
+    today_month_year  = _month_year(today)
+    date_srок         = f'{_date_word(date_event)} года {time_event}'
+    date_schet_word   = _date_word(today)
+    price_fmt         = _fmt_price(price)
+
+    # Полная строка заказчика для счёта: "ООО Название, ИНН ..., КПП ..., адрес"
+    zak_polnaya_parts = [p for p in [company_name, 
+                                      f'ИНН {inn}' if inn else '',
+                                      f'КПП {kpp}' if kpp else '',
+                                      address_zak] if p]
+    zak_polnaya = ', '.join(zak_polnaya_parts) if zak_polnaya_parts else '—'
 
     tmp_dir = tempfile.mkdtemp()
     results = []
 
-    # ДОГОВОР (docx)
-    work_dir = os.path.join(tmp_dir, 'dogovor_work')
-    os.makedirs(work_dir)
-    dogovor_src = ensure_docx(TEMPLATE_DOGOVOR, tmp_dir)
-    with zipfile.ZipFile(dogovor_src, 'r') as z:
-        z.extractall(work_dir)
+    # ── ДОГОВОР (python-docx + [[МАРКЕРЫ]]) ────────────────────────────────────
+    try:
+        dog = DocxDocument(TEMPLATE_DOGOVOR)
+        dog_pairs = [
+            ('[[НОМ]]',      doc_num),
+            ('[[ДЕНЬ]]',     today_day),
+            ('[[МЕС_ГОД]]',  today_month_year),
+            ('[[ДИР]]',      director),
+            ('[[ДЛИТ]]',     duration),
+            ('[[ДАТА_МЕР]]', date_srок),
+            ('[[МЕСТО]]',    address),
+            ('[[СУМ_Ц]]',    price),
+            ('[[СУМ_СЛ]]',   price_short),
+            ('[[ЗАК]]',      company_name),
+            ('[[ЗАК_АДР]]',  address_zak or company_name),
+            ('[[ОГРН]]',     ogrn or '—'),
+            ('[[ИНН]]',      inn),
+            ('[[КПП]]',      kpp),
+            ('[[БИК]]',      bik_zak),
+            ('[[РС]]',       rs_zak),
+            ('[[КС]]',       ks_zak),
+            ('[[ДИР_ИНИ]]',  _initials(director)),
+        ]
+        _apply_replacements(dog.element.body, dog_pairs)
+        dog_path = os.path.join(tmp_dir, f'Договор_{doc_num}.docx')
+        dog.save(dog_path)
+        results.append((dog_path, f'Договор_{doc_num}.docx'))
+    except Exception as e:
+        raise Exception(f"Ошибка договора: {e}")
 
-    doc_xml_path = find_doc_xml(work_dir)
-    with open(doc_xml_path, encoding='utf-8') as f:
-        xml = f.read()
+    # ── СЧЁТ (python-docx + [[МАРКЕРЫ]]) ───────────────────────────────────────
+    try:
+        sch = DocxDocument(TEMPLATE_SCHET)
+        sch_pairs = [
+            ('[[НОМ]]',      doc_num),
+            ('[[ДАТА_СЧЕТ]]', date_schet_word),
+            ('[[ДАТА_МЕР]]', date_event),
+            ('[[ЗАК_ПОЛН]]', zak_polnaya),
+            ('[[СУМ_Ц]]',    price_fmt),
+            ('[[СУМ_СЛ]]',   price_words),
+        ]
+        _apply_replacements(sch.element.body, sch_pairs)
+        sch_path = os.path.join(tmp_dir, f'Счёт_{doc_num}.docx')
+        sch.save(sch_path)
+        sch_pdf = convert_to_pdf(sch_path, tmp_dir)
+        results.append((sch_pdf, f'Счёт_{doc_num}.pdf') if sch_pdf
+                       else (sch_path, f'Счёт_{doc_num}.docx'))
+    except Exception as e:
+        raise Exception(f"Ошибка счёта: {e}")
 
-    xml = xml.replace('<w:highlight w:val="yellow"/>', '')
-    replacements_doc = [
-        ('136', doc_num),
-        ('сентября 2025', _month_year(today)),
-        ('«2»', f'«{today.split(".")[0]}»'),
-        ('Общество с ограниченной ответственностью «ВК»', company_name),
-        ('Общество с ограниченной ответственностью «Гарда Технологии»', company_name),
-        ('Генерального Директора Багудиной Елены Геннадьевны', f'Генерального Директора {director}'),
-        ('4 часа', duration),
-        ('27 сентября 2025 года 16:00 - 20:00', f'{date_event} года {time_event}'),
-        ('г. Красногорск, Московская область, Яхт-клуб «Парк Рублёво»', address),
-        ('76 280 (семьдесят шесть тысяч двести восемьдесят)', f'{price} ({price_words})'),
-        ('1027739850962', ogrn),
-        ('7743001840 / 997750001', f'{inn} / {kpp}'),
-        ('044525823', bik_zak),
-        ('БАНК ГПБ (АО)', bank_zak),
-        ('40702810100000003759', rs_zak),
-        ('30101810200000000823', ks_zak),
-        ('Генеральный директор управляющей организации ООО «Управляющая компания ВК»',
-         f'Генеральный директор {company_name}'),
-        ('Багудина Елена Геннадьевна', director),
-        ('Багудина Е.Г.', _initials(director)),
-    ]
-    for old, new in replacements_doc:
-        xml = xml.replace(old, new)
-
-    with open(doc_xml_path, 'w', encoding='utf-8') as f:
-        f.write(xml)
-
-    dogovor_path = os.path.join(tmp_dir, f'Договор_{doc_num}_{company_name[:20]}.docx')
-    with zipfile.ZipFile(dogovor_path, 'w', zipfile.ZIP_DEFLATED) as z:
-        for root, dirs, files in os.walk(work_dir):
-            for file in files:
-                fp = os.path.join(root, file)
-                z.write(fp, os.path.relpath(fp, work_dir))
-    results.append((dogovor_path, f'Договор_{doc_num}.docx'))
-
-    # СЧЁТ (docx → pdf)
-    work_dir2 = os.path.join(tmp_dir, 'schet_work')
-    os.makedirs(work_dir2)
-    with zipfile.ZipFile(TEMPLATE_SCHET, 'r') as z:
-        z.extractall(work_dir2)
-
-    schet_xml = find_doc_xml(work_dir2)
-    with open(schet_xml, encoding='utf-8') as f:
-        xml2 = f.read()
-
-    replacements_schet = [
-        ('ИП ЭРДЫНЕЕВ ГЭСЭР БУЯНТУЕВИЧ', ISPOLNITEL['name']),
-        ('032315540193', ISPOLNITEL['inn']),
-        ('АО «ТБанк»', ISPOLNITEL['bank']),
-        ('044525974', ISPOLNITEL['bik']),
-        ('30101810145250000974', ISPOLNITEL['ks']),
-        ('40802810500007432200', ISPOLNITEL['rs']),
-        ('670011, РОССИЯ, РЕСП БУРЯТИЯ, Г УЛАН-УДЭ, МКР 142-Й, -, Д 4, КВ 18', ISPOLNITEL['address']),
-        ('304 от 10 сентября 2025 г.', f'{doc_num} от {_full_date(today)} г.'),
-        ('ЮЛ, ИНН, КПП, АДРЕС', f'{company_name}, ИНН {inn}, КПП {kpp}'),
-        ('Организация мероприятия', 'Организация мероприятия'),
-        ('10.10.2025', date_event),
-        ('1 000,00', _fmt_price(price)),
-        ('1\xa0000,00', _fmt_price(price)),
-        ('1000,00', price.replace(' ', '')+',00'),
-        ('Одна тысяча рублей 00 копеек', price_words),
-    ]
-    for old, new in replacements_schet:
-        xml2 = xml2.replace(old, new)
-
-    with open(schet_xml, 'w', encoding='utf-8') as f:
-        f.write(xml2)
-
-    schet_docx = os.path.join(tmp_dir, f'Счёт_{doc_num}.docx')
-    with zipfile.ZipFile(schet_docx, 'w', zipfile.ZIP_DEFLATED) as z:
-        for root, dirs, files in os.walk(work_dir2):
-            for file in files:
-                fp = os.path.join(root, file)
-                z.write(fp, os.path.relpath(fp, work_dir2))
-
-    schet_pdf = convert_to_pdf(schet_docx, tmp_dir)
-    if schet_pdf:
-        results.append((schet_pdf, f'Счёт_{doc_num}.pdf'))
-    else:
-        results.append((schet_docx, f'Счёт_{doc_num}.docx'))
-
-    # АКТ (docx → pdf)
-    work_dir3 = os.path.join(tmp_dir, 'akt_work')
-    os.makedirs(work_dir3)
-    akt_src = ensure_docx(TEMPLATE_AKT, tmp_dir)
-    with zipfile.ZipFile(akt_src, 'r') as z:
-        z.extractall(work_dir3)
-
-    akt_xml = find_doc_xml(work_dir3)
-    with open(akt_xml, encoding='utf-8') as f:
-        xml3 = f.read()
-
-    replacements_akt = [
-        ('N 151 от «10» октября', f'N {doc_num} от «{date_event.split(".")[0]}» {_month_only(date_event)}'),
-        ('2025г._________________________________________________',
-         f'{date_event.split(".")[-1]}г._________________________________________________'),
-        ('ЮЛ, ИНН', f'{ISPOLNITEL["name"]}, ИНН {ISPOLNITEL["inn"]}'),
-        ('Заказчик: ИП Эрдынеев Гэсэр Буянтуевич, ИНН 032315540193',
-         f'Заказчик: {company_name}, ИНН {inn}'),
-        ('Организация мероприятия', 'Организация мероприятия'),
-        ('10.10.2025', date_event),
-        ('1 000,00', _fmt_price(price)),
-        ('1\xa0000,00', _fmt_price(price)),
-        (': 1 000,00', f': {_fmt_price(price)}'),
-        ('Одна тысяча рублей 00 копеек', price_words),
-    ]
-    for old, new in replacements_akt:
-        xml3 = xml3.replace(old, new)
-
-    with open(akt_xml, 'w', encoding='utf-8') as f:
-        f.write(xml3)
-
-    akt_docx = os.path.join(tmp_dir, f'Акт_{doc_num}.docx')
-    with zipfile.ZipFile(akt_docx, 'w', zipfile.ZIP_DEFLATED) as z:
-        for root, dirs, files in os.walk(work_dir3):
-            for file in files:
-                fp = os.path.join(root, file)
-                z.write(fp, os.path.relpath(fp, work_dir3))
-
-    akt_pdf = convert_to_pdf(akt_docx, tmp_dir)
-    if akt_pdf:
-        results.append((akt_pdf, f'Акт_{doc_num}.pdf'))
-    else:
-        results.append((akt_docx, f'Акт_{doc_num}.docx'))
+    # ── АКТ (XML подход — сохраняем совместимость с template_akt.docx) ──────────
+    try:
+        wdir3 = os.path.join(tmp_dir, 'akt_work')
+        os.makedirs(wdir3)
+        akt_src = ensure_docx(TEMPLATE_AKT, tmp_dir)
+        with zipfile.ZipFile(akt_src, 'r') as z:
+            z.extractall(wdir3)
+        xml_path3 = find_doc_xml(wdir3)
+        with open(xml_path3, encoding='utf-8') as f:
+            xml3 = f.read()
+        xml3 = normalize_docx_xml(xml3)
+        akt_repl = [
+            ('N 151 от «10» октября',
+             f'N {doc_num} от «{date_event.split(".")[0]}» {_month_only(date_event)}'),
+            ('2025г.',   f'{date_event.split(".")[-1]}г.'),
+            ('ЮЛ, ИНН',
+             f'{ISPOLNITEL["name"]}, ИНН {ISPOLNITEL["inn"]}'),
+            ('ИП Эрдынеев Гэсэр Буянтуевич, ИНН 032315540193',
+             f'{company_name}, ИНН {inn}'),
+            ('10.10.2025',  date_event),
+            ('1 000,00',    price_fmt),
+            ('1\xa0000,00', price_fmt),
+            (': 1 000,00',  f': {price_fmt}'),
+            ('Одна тысяча рублей 00 копеек', price_words),
+        ]
+        for old, new in akt_repl:
+            if old and new:
+                xml3 = xml3.replace(old, new)
+        with open(xml_path3, 'w', encoding='utf-8') as f:
+            f.write(xml3)
+        akt_docx = os.path.join(tmp_dir, f'Акт_{doc_num}.docx')
+        with zipfile.ZipFile(akt_docx, 'w', zipfile.ZIP_DEFLATED) as z:
+            for root, dirs, files in os.walk(wdir3):
+                for fn in files:
+                    fp = os.path.join(root, fn)
+                    z.write(fp, os.path.relpath(fp, wdir3))
+        akt_pdf = convert_to_pdf(akt_docx, tmp_dir)
+        results.append((akt_pdf, f'Акт_{doc_num}.pdf') if akt_pdf
+                       else (akt_docx, f'Акт_{doc_num}.docx'))
+    except Exception as e:
+        raise Exception(f"Ошибка акта: {e}")
 
     return results, tmp_dir
 
@@ -801,18 +912,17 @@ async def doc_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return DOC_TIME
 
 async def doc_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data['time_event'] = update.message.text.strip()
-    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("Длительность? (например: 1,5 часа)")
-    track(ctx, msg.message_id)
-    return DOC_DUR
-
-async def doc_dur(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data['duration'] = update.message.text.strip()
+    time_str = update.message.text.strip()
+    ctx.user_data['time_event'] = time_str
+    # Считаем длительность автоматически из времени
+    dur = calc_duration(time_str)
+    ctx.user_data['duration'] = dur if dur else '—'
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Адрес проведения:")
     track(ctx, msg.message_id)
     return DOC_ADDR
+
+
 
 async def doc_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['address'] = update.message.text.strip()
@@ -827,12 +937,15 @@ async def doc_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data['price'] = f"{int(''.join(filter(str.isdigit, raw))):,}".replace(',', ' ')
     except:
         ctx.user_data['price'] = raw
+    # Автоустанавливаем сегодняшнюю дату — больше не спрашиваем
+    ctx.user_data['today'] = date.today().strftime('%d.%m.%Y')
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text(
-        f"Сегодняшняя дата (для счёта)? Сегодня: {date.today().strftime('%d.%m.%Y')}"
+        "Карточка предприятия заказчика:",
+        reply_markup=kb_card_choice()
     )
     track(ctx, msg.message_id)
-    return DOC_PAY_DATE
+    return DOC_CARD_CHOICE
 
 async def doc_pay_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['today'] = update.message.text.strip()
@@ -850,20 +963,16 @@ async def doc_card_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await delete_tracked(ctx, q.message.chat_id)
         await q.message.reply_text("Отменено.")
         return ConversationHandler.END
-    ctx.user_data['card_method'] = q.data
-    if q.data == "card_file":
-        await q.edit_message_text("Загрузи txt файл с карточкой предприятия:")
-    else:
-        await q.edit_message_text("Вставь текст карточки предприятия:")
+    await q.edit_message_text(
+        "Вставь текст карточки предприятия (скопируй из Word или любого документа):"
+    )
     return DOC_CARD
 
 async def doc_card_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     ctx.user_data['card'] = parse_card(text)
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("ФИО генерального директора заказчика (полностью):")
-    track(ctx, msg.message_id)
-    return DOC_DIRECTOR
+    return await _after_card_parsed(update, ctx)
 
 async def doc_card_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     file = await update.message.document.get_file()
@@ -874,31 +983,47 @@ async def doc_card_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     os.remove(tmp)
     ctx.user_data['card'] = parse_card(text)
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("ФИО генерального директора заказчика (полностью):")
+    return await _after_card_parsed(update, ctx)
+
+async def _after_card_parsed(update, ctx):
+    """После разбора карточки: если директор найден — пропускаем вопрос."""
+    card = ctx.user_data.get('card', {})
+    if card.get('director'):
+        ctx.user_data['director'] = card['director']
+        return await _show_doc_summary(update, ctx)
+    msg = await update.message.reply_text(
+        "ФИО генерального директора заказчика (полностью):"
+    )
     track(ctx, msg.message_id)
     return DOC_DIRECTOR
 
-async def doc_director(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data['director'] = update.message.text.strip()
-    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
 
+async def _show_doc_summary(update, ctx):
+    """Показывает итоговую сводку перед созданием документов."""
     card = ctx.user_data.get('card', {})
+    dur = ctx.user_data.get('duration', '—')
     summary = (
         f"Проверь данные документов:\n\n"
         f"Договор №{ctx.user_data['doc_num']}\n"
         f"Дата мероприятия: {ctx.user_data['date_event']}\n"
         f"Время: {ctx.user_data['time_event']}\n"
-        f"Длительность: {ctx.user_data['duration']}\n"
+        f"Длительность: {dur}\n"
         f"Адрес: {ctx.user_data['address']}\n"
         f"Стоимость: {ctx.user_data['price']} руб\n"
         f"Дата счёта: {ctx.user_data['today']}\n"
         f"Заказчик: {card.get('name', '?')}\n"
         f"ИНН: {card.get('inn', '?')}\n"
-        f"Директор: {ctx.user_data['director']}"
+        f"Директор: {ctx.user_data.get('director', '?')}"
     )
     msg = await update.message.reply_text(summary, reply_markup=kb_doc_confirm())
     track(ctx, msg.message_id)
     return DOC_CONFIRM
+
+
+async def doc_director(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['director'] = update.message.text.strip()
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    return await _show_doc_summary(update, ctx)
 
 async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -980,10 +1105,9 @@ def main():
             DOC_ADDR:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_addr)],
             DOC_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_price)],
             DOC_PAY_DATE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_pay_date)],
-            DOC_CARD_CHOICE: [CallbackQueryHandler(doc_card_choice, pattern=r'^(card_|cancel)')],
+            DOC_CARD_CHOICE: [CallbackQueryHandler(doc_card_choice, pattern=r'^(card_text|cancel)')],
             DOC_CARD:        [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, doc_card_text),
-                MessageHandler(filters.Document.ALL, doc_card_file),
             ],
             DOC_DIRECTOR:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_director)],
             DOC_CONFIRM:     [CallbackQueryHandler(doc_confirm, pattern=r'^(doc_confirm_|cancel)')],
