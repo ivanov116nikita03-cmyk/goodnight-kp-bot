@@ -174,10 +174,22 @@ def parse_card(text):
     data = {}
     t = text.strip()
 
-    # Название организации
-    m = re.search(r'((?:ООО|ОАО|ЗАО|АО|ИП)\s*[«"]?[А-ЯЁA-Za-z«"][^»"\n]{1,80}[»"]?)', t, re.I)
+    # Название организации — несколько стратегий по убыванию точности:
+    # 1) Аббревиатура в кавычках: ООО "АМБУШСТОР" / ООО «Ромашка»
+    m = re.search(
+        r'((?:ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ|АКЦИОНЕРНОЕ ОБЩЕСТВО|'
+        r'ПУБЛИЧНОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО|ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ|'
+        r'ООО|ОАО|ЗАО|АО|ПАО|ИП)\s*[«""]?[А-ЯЁA-Za-z0-9«""\'«][^»""\n]{0,80}[»""]?)',
+        t, re.I
+    )
     if m:
         data['name'] = m.group(1).strip().rstrip(',. ')
+    else:
+        # 2) Первая непустая строка целиком — если она длиннее 3 слов и не похожа на метку
+        first_line = t.split('\n')[0].strip()
+        if (len(first_line) > 5
+                and not re.match(r'^(ИНН|КПП|ОГРН|БИК|р/?с|к/?с|Банк|Счёт|Счет|Адрес)', first_line, re.I)):
+            data['name'] = first_line.rstrip(',. ')
 
     # ИНН (10 или 12 цифр)
     m = re.search(r'ИНН\D{0,3}(\d{10,12})', t, re.I)
@@ -542,7 +554,8 @@ def build_docs(data):
     director     = data.get('director', '')
 
     doc_num    = data['doc_num']
-    today      = data.get('today', date.today().strftime('%d.%m.%Y'))
+    # Дата договора — всегда автоматически сегодняшняя
+    today      = date.today().strftime('%d.%m.%Y')
     date_event = data['date_event']
     time_event = data['time_event']
     duration   = data.get('duration', '—')
@@ -551,14 +564,14 @@ def build_docs(data):
 
     price_words       = num_to_words(price.replace(' ', ''))
     price_short       = num_to_words_short(price)
-    today_day         = today.split('.')[0]
+    today_day         = today.split('.')[0].lstrip('0')   # «2» вместо «02»
     today_month_year  = _month_year(today)
     date_srок         = f'{_date_word(date_event)} года {time_event}'
     date_schet_word   = _date_word(today)
     price_fmt         = _fmt_price(price)
 
     # Полная строка заказчика для счёта: "ООО Название, ИНН ..., КПП ..., адрес"
-    zak_polnaya_parts = [p for p in [company_name, 
+    zak_polnaya_parts = [p for p in [company_name,
                                       f'ИНН {inn}' if inn else '',
                                       f'КПП {kpp}' if kpp else '',
                                       address_zak] if p]
@@ -567,9 +580,16 @@ def build_docs(data):
     tmp_dir = tempfile.mkdtemp()
     results = []
 
-    # ── ДОГОВОР (python-docx + [[МАРКЕРЫ]]) ────────────────────────────────────
+    # ── ДОГОВОР (XML-подход для надёжной замены разбитых runs) ─────────────────
     try:
-        dog = DocxDocument(TEMPLATE_DOGOVOR)
+        wdir1 = os.path.join(tmp_dir, 'dog_work')
+        os.makedirs(wdir1)
+        with zipfile.ZipFile(TEMPLATE_DOGOVOR, 'r') as z:
+            z.extractall(wdir1)
+        xml_path1 = find_doc_xml(wdir1)
+        with open(xml_path1, encoding='utf-8') as f:
+            xml1 = f.read()
+        xml1 = normalize_docx_xml(xml1)
         dog_pairs = [
             ('[[НОМ]]',      doc_num),
             ('[[ДЕНЬ]]',     today_day),
@@ -590,34 +610,61 @@ def build_docs(data):
             ('[[КС]]',       ks_zak),
             ('[[ДИР_ИНИ]]',  _initials(director)),
         ]
-        _apply_replacements(dog.element.body, dog_pairs)
+        for old, new in dog_pairs:
+            if old:
+                xml1 = xml1.replace(old, new)
+        with open(xml_path1, 'w', encoding='utf-8') as f:
+            f.write(xml1)
         dog_path = os.path.join(tmp_dir, f'Договор_{doc_num}.docx')
-        dog.save(dog_path)
+        with zipfile.ZipFile(dog_path, 'w', zipfile.ZIP_DEFLATED) as z:
+            for root, dirs, files in os.walk(wdir1):
+                for fn in files:
+                    fp = os.path.join(root, fn)
+                    z.write(fp, os.path.relpath(fp, wdir1))
         results.append((dog_path, f'Договор_{doc_num}.docx'))
     except Exception as e:
         raise Exception(f"Ошибка договора: {e}")
 
-    # ── СЧЁТ (python-docx + [[МАРКЕРЫ]]) ───────────────────────────────────────
+    # ── СЧЁТ (XML-подход для надёжной замены) ──────────────────────────────────
     try:
-        sch = DocxDocument(TEMPLATE_SCHET)
+        wdir2 = os.path.join(tmp_dir, 'sch_work')
+        os.makedirs(wdir2)
+        with zipfile.ZipFile(TEMPLATE_SCHET, 'r') as z:
+            z.extractall(wdir2)
+        xml_path2 = find_doc_xml(wdir2)
+        with open(xml_path2, encoding='utf-8') as f:
+            xml2 = f.read()
+        xml2 = normalize_docx_xml(xml2)
         sch_pairs = [
-            ('[[НОМ]]',      doc_num),
+            ('[[НОМ]]',       doc_num),
             ('[[ДАТА_СЧЕТ]]', date_schet_word),
-            ('[[ДАТА_МЕР]]', date_event),
-            ('[[ЗАК_ПОЛН]]', zak_polnaya),
-            ('[[СУМ_Ц]]',    price_fmt),
-            ('[[СУМ_СЛ]]',   price_words),
+            ('[[ДАТА_МЕР]]',  date_event),
+            ('[[ЗАК_ПОЛН]]',  zak_polnaya),
+            # Отдельные маркеры на случай если шаблон использует их раздельно
+            ('[[ЗАК]]',       company_name),
+            ('[[ИНН]]',       inn),
+            ('[[КПП]]',       kpp),
+            ('[[СУМ_Ц]]',     price_fmt),
+            ('[[СУМ_СЛ]]',    price_words),
         ]
-        _apply_replacements(sch.element.body, sch_pairs)
+        for old, new in sch_pairs:
+            if old:
+                xml2 = xml2.replace(old, new)
+        with open(xml_path2, 'w', encoding='utf-8') as f:
+            f.write(xml2)
         sch_path = os.path.join(tmp_dir, f'Счёт_{doc_num}.docx')
-        sch.save(sch_path)
+        with zipfile.ZipFile(sch_path, 'w', zipfile.ZIP_DEFLATED) as z:
+            for root, dirs, files in os.walk(wdir2):
+                for fn in files:
+                    fp = os.path.join(root, fn)
+                    z.write(fp, os.path.relpath(fp, wdir2))
         sch_pdf = convert_to_pdf(sch_path, tmp_dir)
         results.append((sch_pdf, f'Счёт_{doc_num}.pdf') if sch_pdf
                        else (sch_path, f'Счёт_{doc_num}.docx'))
     except Exception as e:
         raise Exception(f"Ошибка счёта: {e}")
 
-    # ── АКТ (XML подход — сохраняем совместимость с template_akt.docx) ──────────
+    # ── АКТ (XML подход) ────────────────────────────────────────────────────────
     try:
         wdir3 = os.path.join(tmp_dir, 'akt_work')
         os.makedirs(wdir3)
@@ -628,19 +675,37 @@ def build_docs(data):
         with open(xml_path3, encoding='utf-8') as f:
             xml3 = f.read()
         xml3 = normalize_docx_xml(xml3)
+
+        # Строки исполнителя — фиксированные
+        isp_str = f'{ISPOLNITEL["name"]}, ИНН {ISPOLNITEL["inn"]}'
+        # Строка заказчика — из карточки
+        zak_str = company_name
+        if inn:
+            zak_str += f', ИНН {inn}'
+
         akt_repl = [
+            # Маркеры (если шаблон уже обновлён setup_templates)
+            ('[[ЗАК]]',   company_name),
+            ('[[ИНН]]',   inn),
+            # Хардкод-строки старых шаблонов (обратная совместимость)
             ('N 151 от «10» октября',
              f'N {doc_num} от «{date_event.split(".")[0]}» {_month_only(date_event)}'),
-            ('2025г.',   f'{date_event.split(".")[-1]}г.'),
-            ('ЮЛ, ИНН',
-             f'{ISPOLNITEL["name"]}, ИНН {ISPOLNITEL["inn"]}'),
-            ('ИП Эрдынеев Гэсэр Буянтуевич, ИНН 032315540193',
-             f'{company_name}, ИНН {inn}'),
+            ('2025г.',    f'{date_event.split(".")[-1]}г.'),
+            # Исполнитель (старый вариант с другим ИП)
+            ('ИП Эрдынеев Гэсэр Буянтуевич, ИНН 032315540193', isp_str),
+            ('ЮЛ, ИНН',  isp_str),
+            # Заказчик — подставляем company_name + ИНН вместо любого старого значения
+            ('Заказчик, ИНН 9725189078', zak_str),
+            ('Заказчик, ИНН',            zak_str),
+            # Дата мероприятия и суммы
             ('10.10.2025',  date_event),
+            ('12.12.2012',  date_event),
             ('1 000,00',    price_fmt),
             ('1\xa0000,00', price_fmt),
+            ('12 000,00',   price_fmt),
             (': 1 000,00',  f': {price_fmt}'),
-            ('Одна тысяча рублей 00 копеек', price_words),
+            ('Одна тысяча рублей 00 копеек',     price_words),
+            ('Двенадцать тысяч рублей 00 копеек', price_words),
         ]
         for old, new in akt_repl:
             if old and new:
@@ -937,8 +1002,6 @@ async def doc_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data['price'] = f"{int(''.join(filter(str.isdigit, raw))):,}".replace(',', ' ')
     except:
         ctx.user_data['price'] = raw
-    # Автоустанавливаем сегодняшнюю дату — больше не спрашиваем
-    ctx.user_data['today'] = date.today().strftime('%d.%m.%Y')
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text(
         "Карточка предприятия заказчика:",
