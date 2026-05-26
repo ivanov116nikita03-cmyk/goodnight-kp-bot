@@ -780,6 +780,7 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if query.data == "menu_kp":
         ctx.user_data.clear()
         await query.edit_message_text("Для кого КП? (например: Компании Ромашка)")
+        # ФИХ 2: трекаем сообщение "Как зовут клиента?" чтобы оно удалилось в конце
         track(ctx, query.message.message_id)
         return KP_NAME
     elif query.data == "menu_docs":
@@ -802,6 +803,9 @@ async def cmd_kp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def kp_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['name'] = update.message.text.strip()
+    # ФИХ 2: сразу пытаемся удалить сообщение пользователя с именем
+    # В личном чате Telegram не позволяет удалять чужие сообщения — safe_delete молча игнорирует
+    # В группе с правами администратора сообщение будет удалено
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Выбери локацию:", reply_markup=kb_location())
     track(ctx, msg.message_id)
@@ -1003,6 +1007,7 @@ async def doc_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Карточка предприятия заказчика:",
         reply_markup=kb_card_choice()
     )
+    ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
     track(ctx, msg.message_id)
     return DOC_CARD_CHOICE
 
@@ -1069,7 +1074,7 @@ async def _show_doc_summary(update, ctx):
         f"Длительность: {dur}\n"
         f"Адрес: {ctx.user_data['address']}\n"
         f"Стоимость: {ctx.user_data['price']} руб\n"
-        f"Дата счёта: {ctx.user_data['today']}\n"
+        f"Дата счёта: {ctx.user_data.get('today', __import__('datetime').date.today().strftime('%d.%m.%Y'))}\n"
         f"Заказчик: {card.get('name', '?')}\n"
         f"ИНН: {card.get('inn', '?')}\n"
         f"Директор: {ctx.user_data.get('director', '?')}"
@@ -1155,7 +1160,7 @@ def main():
         ],
         states={
             DOC_MENU: [
-                CallbackQueryHandler(menu_cb, pattern=r'^(menu_all_docs|menu_back|cancel)$'),
+                CallbackQueryHandler(menu_cb, pattern=r'^(menu_docs|menu_all_docs|menu_back|cancel)$'),
             ],
             DOC_NUM:         [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_num)],
             DOC_DATE_EVENT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_date)],
