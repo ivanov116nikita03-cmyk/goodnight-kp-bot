@@ -212,12 +212,12 @@ def parse_card(text):
         data['bik'] = m.group(1)
 
     # Расчётный счёт (20 цифр)
-    m = re.search(r'(?:расчетный\s+счет|р/?с|р\.\s*сч|Сч\.)\D{0,5}(\d{20})', t, re.I)
+    m = re.search(r'(?:расчетный\s+счет|р/?с|р\.\s*сч|Сч\.|Счёт|Счет)\D{0,8}(\d{20})', t, re.I)
     if m:
         data['rs'] = m.group(1)
 
     # Корреспондентский счёт (20 цифр)
-    m = re.search(r'(?:к/?с|корр\w*)\D{0,5}(\d{20})', t, re.I)
+    m = re.search(r'(?:к/?с|корр\w*)\D{0,8}(\d{20})', t, re.I)
     if m:
         data['ks'] = m.group(1)
 
@@ -522,16 +522,9 @@ def find_doc_xml(work_dir):
 
 
 def post_process_docx_xml(xml):
-    """Убирает жёлтую подсветку, шрифт 10pt, выравнивание по левому краю."""
-    # Убираем жёлтую подсветку (highlight и shading)
+    """Убирает только жёлтую подсветку текста."""
     xml = re.sub(r'<w:highlight[^/]*/>', '', xml)
-    xml = re.sub(r'<w:highlight[^>]*/>', '', xml)
-    xml = re.sub(r'<w:shd[^/]*/>', '', xml)
-    # Шрифт 10pt = 20 half-points
-    xml = re.sub(r'<w:sz w:val="\d+"/>', '<w:sz w:val="20"/>', xml)
-    xml = re.sub(r'<w:szCs w:val="\d+"/>', '<w:szCs w:val="20"/>', xml)
-    # Убираем inline center — заголовки получают центрирование из стиля, не из inline
-    xml = xml.replace('<w:jc w:val="center"/>', '<w:jc w:val="left"/>')
+    xml = re.sub(r'<w:highlight\b[^>]*/>', '', xml)
     return xml
 
 
@@ -656,8 +649,9 @@ def build_docs(data):
         for old, new in dog_pairs:
             if old:
                 xml1 = xml1.replace(old, new)
-        # Очищаем случайные конкатенации ОГРН (маркер + старое значение)
-        xml1 = re.sub(r'(ОГРН\s*)(\d{13,15})\d+', r'\1\2', xml1)
+        # Удаляем лишние цифры после ОГРН
+        if ogrn:
+            xml1 = re.sub(re.escape(ogrn) + r'\d+', ogrn, xml1)
         with open(xml_path1, 'w', encoding='utf-8') as f:
             f.write(xml1)
         dog_path = os.path.join(tmp_dir, f'Договор_{doc_num}.docx')
