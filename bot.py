@@ -445,7 +445,7 @@ def _date_word(date_str):
 
 def build_kp(data):
     loc = data['location']
-    name_gen = make_genitive(data['name'])
+    name_gen = data['name']
     date_str = data['date']
     time_str = data['time']
     prog = data['program_lines']
@@ -779,8 +779,7 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if query.data == "menu_kp":
         ctx.user_data.clear()
-        await query.edit_message_text("Как зовут клиента?")
-        # ФИХ 2: трекаем сообщение "Как зовут клиента?" чтобы оно удалилось в конце
+        await query.edit_message_text("Для кого КП? (например: Компании Ромашка)")
         track(ctx, query.message.message_id)
         return KP_NAME
     elif query.data == "menu_docs":
@@ -797,15 +796,12 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_kp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
-    msg = await update.message.reply_text("Как зовут клиента?")
+    msg = await update.message.reply_text("Для кого КП? (например: Компании Ромашка)")
     track(ctx, msg.message_id)
     return KP_NAME
 
 async def kp_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data['name'] = update.message.text.strip().capitalize()
-    # ФИХ 2: сразу пытаемся удалить сообщение пользователя с именем
-    # В личном чате Telegram не позволяет удалять чужие сообщения — safe_delete молча игнорирует
-    # В группе с правами администратора сообщение будет удалено
+    ctx.user_data['name'] = update.message.text.strip()
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text("Выбери локацию:", reply_markup=kb_location())
     track(ctx, msg.message_id)
@@ -936,7 +932,7 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         d = ctx.user_data
         loc = d['location']
-        name_gen = make_genitive(d['name'])
+        name_gen = d['name']
         path, fname, tmp_dir = make_kp_pdf(
             loc, name_gen, d['date'], d['time'],
             d['program_lines'], d['price'],
@@ -1164,7 +1160,6 @@ def main():
             DOC_NUM:         [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_num)],
             DOC_DATE_EVENT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_date)],
             DOC_TIME:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_time)],
-            DOC_DUR:         [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_dur)],
             DOC_ADDR:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_addr)],
             DOC_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_price)],
             DOC_PAY_DATE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_pay_date)],
