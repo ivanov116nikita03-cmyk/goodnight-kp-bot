@@ -521,6 +521,20 @@ def find_doc_xml(work_dir):
     raise FileNotFoundError(f"document.xml не найден в {work_dir}")
 
 
+def post_process_docx_xml(xml):
+    """Убирает жёлтую подсветку, шрифт 10pt, выравнивание по левому краю."""
+    # Убираем жёлтую подсветку (highlight и shading)
+    xml = re.sub(r'<w:highlight[^/]*/>', '', xml)
+    xml = re.sub(r'<w:highlight[^>]*/>', '', xml)
+    xml = re.sub(r'<w:shd[^/]*/>', '', xml)
+    # Шрифт 10pt = 20 half-points
+    xml = re.sub(r'<w:sz w:val="\d+"/>', '<w:sz w:val="20"/>', xml)
+    xml = re.sub(r'<w:szCs w:val="\d+"/>', '<w:szCs w:val="20"/>', xml)
+    # Убираем inline center — заголовки получают центрирование из стиля, не из inline
+    xml = xml.replace('<w:jc w:val="center"/>', '<w:jc w:val="left"/>')
+    return xml
+
+
 def _apply_replacements(body, pairs):
     """Применяет замены во всех параграфах, включая вложенные таблицы.
     Объединяет все runs параграфа, делает замену, кладёт в первый run."""
@@ -590,6 +604,7 @@ def build_docs(data):
         with open(xml_path1, encoding='utf-8') as f:
             xml1 = f.read()
         xml1 = normalize_docx_xml(xml1)
+        xml1 = post_process_docx_xml(xml1)
         bank_zak = card.get('bank', '')
         dog_pairs = [
             # ── Маркеры нового шаблона ──────────────────────────────────────
@@ -617,9 +632,9 @@ def build_docs(data):
             ('Общество с ограниченной ответственностью «Гарда Технологии»', company_name),
             # Адреса заказчика в блоке 7
             ('Юридический адрес: 125167, г. Москва, Ленинградский проспект, д. 39, стр. 79.',
-             f'Юридический адрес: {address_zak or "—"}'),
+             f'Юридический адрес: {address_zak}' if address_zak else 'Юридический адрес: —'),
             ('Фактический адрес: 125167, г. Москва, Ленинградский проспект, д. 39, стр. 79.',
-             f'Фактический адрес: {address_zak or "—"}'),
+             f'Фактический адрес: {address_zak}' if address_zak else 'Фактический адрес: —'),
             # Реквизиты заказчика в блоке 7 (старые значения)
             ('1027739850962', ogrn or '—'),   # старый ОГРН (остаток после маркера)
             ('7743001840',    inn),
@@ -665,6 +680,7 @@ def build_docs(data):
         with open(xml_path2, encoding='utf-8') as f:
             xml2 = f.read()
         xml2 = normalize_docx_xml(xml2)
+        xml2 = post_process_docx_xml(xml2)
         sch_pairs = [
             ('[[НОМ]]',       doc_num),
             ('[[ДАТА_СЧЕТ]]', date_schet_word),
@@ -708,6 +724,7 @@ def build_docs(data):
         with open(xml_path3, encoding='utf-8') as f:
             xml3 = f.read()
         xml3 = normalize_docx_xml(xml3)
+        xml3 = post_process_docx_xml(xml3)
 
         # Строки исполнителя — фиксированные
         isp_str = f'{ISPOLNITEL["name"]}, ИНН {ISPOLNITEL["inn"]}'
@@ -823,8 +840,10 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         track(ctx, query.message.message_id)
         return DOC_MENU
     elif query.data == "menu_all_docs":
+        saved_mid = query.message.message_id   # сохраняем до clear()
         ctx.user_data.clear()
         await query.edit_message_text("Номер договора (например: 11):")
+        track(ctx, saved_mid)                  # трекаем заново
         return DOC_NUM
     elif query.data == "menu_back":
         await query.edit_message_text("Главное меню:", reply_markup=kb_main())
