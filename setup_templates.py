@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Запускать на сервере в /opt/gnbot/:
-  python3 setup_templates.py
-
-Создаёт template_dogovor_new.docx и template_schet_new.docx
-из существующих файлов на сервере.
+cd /opt/gnbot && python3 setup_templates.py
 """
-import os, sys
+import os, sys, re, zipfile, io
 
 try:
     from docx import Document
     from docx.text.paragraph import Paragraph as DocP
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
 except ImportError:
-    print("Устанавливаю python-docx...")
-    os.system("pip install python-docx --break-system-packages")
+    os.system("pip3 install python-docx")
     from docx import Document
     from docx.text.paragraph import Paragraph as DocP
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
 
 def replace_all(body, pairs):
     for child in body:
@@ -29,173 +29,189 @@ def replace_all(body, pairs):
             if nw != full and para.runs:
                 para.runs[0].text = nw
                 for r in para.runs[1:]: r.text = ''
-        elif tag in ('tbl', 'tr', 'tc', 'body'):
+        elif tag in ('tbl','tr','tc','body'):
             replace_all(child, pairs)
 
-def fix_bik_standalone(body):
-    """Заменяем 'БИК ' (пустой, заказчик) на маркер, не трогая 'БИК 044525974' исполнителя"""
-    for child in body:
-        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-        if tag == 'p':
-            para = DocP(child, body)
-            if para.text.strip() in ('БИК', 'БИК '):
-                if para.runs:
-                    para.runs[0].text = 'БИК [[БИК]]'
-                    for r in para.runs[1:]: r.text = ''
-        elif tag in ('tbl', 'tr', 'tc', 'body'):
-            fix_bik_standalone(child)
 
-def fix_zak_standalone(body):
-    """Заменяем строку содержащую ТОЛЬКО 'Заказчик' на маркер"""
-    for child in body:
-        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-        if tag == 'p':
-            para = DocP(child, body)
-            if para.text.strip() == 'Заказчик':
-                if para.runs:
-                    para.runs[0].text = '[[ЗАК]]'
-                    for r in para.runs[1:]: r.text = ''
-        elif tag in ('tbl', 'tr', 'tc', 'body'):
-            fix_zak_standalone(child)
-
-# ─── ДОГОВОР ───────────────────────────────────────────────────────────────
-print("Создаю template_dogovor_new.docx...")
-
-# Ищем последний сгенерированный договор как основу
-import glob
-candidates = glob.glob('Договор_*.docx')
-if not candidates:
-    print("ОШИБКА: Не найден ни один Договор_*.docx в /opt/gnbot/")
-    print("Сначала запусти бота и создай хотя бы один тестовый договор,")
-    print("потом снова запусти этот скрипт.")
-    sys.exit(1)
-
-src_dog = sorted(candidates)[-1]
-print(f"  Использую {src_dog} как основу...")
-
-doc = Document(src_dog)
-pairs_dog = [
-    # Исполнитель — исправляем если устаревший
-    ('ИНН 032386861274', 'ИНН 032315540193'),
-    ('р/с 40802810000009415686', 'р/с 40802810500007432200'),
-    ('ochrvvv@mail.ru', 'msk@goodnight.show'),
-    # Номер договора
-    ('на оказание услуг № 11', 'на оказание услуг № [[НОМ]]'),
-    # Дата создания (разбита по runs — объединяем через полный текст параграфа)
-    ('«2» марта 2026', '«[[ДЕНЬ]]» [[МЕС_ГОД]]'),
-    ('«2» сентября 2025', '«[[ДЕНЬ]]» [[МЕС_ГОД]]'),
-    ('«2» октября 2025', '«[[ДЕНЬ]]» [[МЕС_ГОД]]'),
-    # Директор заказчика — в шапке (подставляется ФИО из карточки)
-    # Ищем любое "действующего на основании Устава" и берём всё до него
-]
-
-# Заменяем через полный текст параграфов
-replace_all(doc.element.body, pairs_dog)
-
-# Директор — ищем строку с "Генерального Директора"
-import re
-for para in doc.paragraphs:
-    if 'Генерального Директора' in para.text and 'действующего' in para.text:
-        full = ''.join(r.text for r in para.runs)
-        new = re.sub(
-            r'Генерального Директора\s+[А-ЯЁ][^\,]+,\s*действующего',
-            'Генерального Директора [[ДИР]], действующего',
-            full
-        )
-        if new != full and para.runs:
-            para.runs[0].text = new
-            for r in para.runs[1:]: r.text = ''
-        break
-
-# Динамические поля — заменяем через regex по параграфам
-for para in doc.paragraphs:
-    full = ''.join(r.text for r in para.runs)
-    new = full
-
-    # Длительность (вида "– 4 часа;")
-    new = re.sub(r'(продолжительность оказания Услуг\s*[–\-]\s*)[\d,\.]+ час[а-я]*;',
-                 r'\1[[ДЛИТ]];', new)
-
-    # Срок (вида "27 марта 2026 года 16:00 - 20:00")
-    new = re.sub(r'(Срок оказания Услуг\s*[–\-]\s*)\d+\s+[а-яё]+\s+\d{4}\s+года\s+[\d:]+\s*[-–]\s*[\d:]+;',
-                 r'\1[[ДАТА_МЕР]];', new)
-
-    # Место
-    new = re.sub(r'(Место проведения:\s*)([^\n]+)',
-                 r'\1[[МЕСТО]]', new)
-
-    # Стоимость (число в скобках со словами)
-    new = re.sub(r'(\bсоставляет\s+)[\d\s\xa0]+\([^)]+\)(\s+рублей)',
-                 r'\1[[СУМ_Ц]] ([[СУМ_СЛ]])\2', new)
-
-    if new != full and para.runs:
-        para.runs[0].text = new
-        for r in para.runs[1:]: r.text = ''
-
-# Реквизиты заказчика в nested table
-replace_all(doc.element.body, [
-    ('Юридический адрес:', 'Юридический адрес:'),  # сохраняем метку
-    ('Фактический адрес:', 'Фактический адрес:'),
-    ('ОГРН ', 'ОГРН [[ОГРН]]'),
-    ('ИНН / КПП /', 'ИНН [[ИНН]] / КПП [[КПП]]'),
-    ('Расчетный счет №', 'Расчетный счет № [[РС]]'),
-    ('к/с №', 'к/с № [[КС]]'),
-])
-
-# Адреса заказчика (убираем конкретные адреса прошлых клиентов)
-import re
 def replace_para_regex(body, pattern, repl):
     for child in body:
         tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
         if tag == 'p':
             para = DocP(child, body)
             full = ''.join(r.text for r in para.runs)
-            new = re.sub(pattern, repl, full)
-            if new != full and para.runs:
-                para.runs[0].text = new
+            nw = re.sub(pattern, repl, full)
+            if nw != full and para.runs:
+                para.runs[0].text = nw
                 for r in para.runs[1:]: r.text = ''
-        elif tag in ('tbl', 'tr', 'tc', 'body'):
+        elif tag in ('tbl','tr','tc','body'):
             replace_para_regex(child, pattern, repl)
 
-replace_para_regex(doc.element.body,
-    r'(Юридический адрес:\s*)[\d\s\w.,«»"]+',
-    r'\1[[ЗАК_АДР]]')
-replace_para_regex(doc.element.body,
-    r'(Фактический адрес:\s*)[\d\s\w.,«»"]+',
-    r'\1[[ЗАК_АДР]]')
 
-fix_bik_standalone(doc.element.body)
-fix_zak_standalone(doc.element.body)
+def fix_standalone(body, find_text, replace_text):
+    for child in body:
+        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+        if tag == 'p':
+            para = DocP(child, body)
+            if para.text.strip() == find_text:
+                if para.runs:
+                    para.runs[0].text = replace_text
+                    for r in para.runs[1:]: r.text = ''
+        elif tag in ('tbl','tr','tc','body'):
+            fix_standalone(child, find_text, replace_text)
 
-# Подписи
+
+def fix_docx_formatting(path):
+    """Применяет к готовому .docx: шрифт 10pt, убирает жёлтый, 
+    исправляет выравнивание секций 4 и 6 (не трогая заголовок документа)."""
+    
+    # Читаем все файлы архива
+    files = {}
+    with zipfile.ZipFile(path, 'r') as z:
+        for name in z.namelist():
+            files[name] = z.read(name)
+
+    xml = files['word/document.xml'].decode('utf-8')
+
+    # 1. Убираем жёлтую подсветку
+    xml = re.sub(r'<w:highlight[^/]*/>', '', xml)
+
+    # 2. Шрифт 10pt для всего текста
+    xml = re.sub(r'<w:sz w:val="\d+"/>', '<w:sz w:val="20"/>', xml)
+    xml = re.sub(r'<w:szCs w:val="\d+"/>', '<w:szCs w:val="20"/>', xml)
+
+    # 3. Выравнивание: убираем center у параграфов КОТОРЫЕ НЕ являются
+    #    заголовком документа. Заголовок ("Договор" / "на оказание услуг")
+    #    получает центрирование через стиль — inline <w:jc> им не нужен.
+    xml = xml.replace('<w:jc w:val="center"/>', '<w:jc w:val="left"/>')
+
+    files['word/document.xml'] = xml.encode('utf-8')
+
+    # Пересобираем zip
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for name, data in files.items():
+            zout.writestr(name, data)
+    with open(path, 'wb') as f:
+        f.write(buf.getvalue())
+
+
+# ════════════════════════════════════════════════════════════
+# ДОГОВОР
+# ════════════════════════════════════════════════════════════
+print("Создаю template_dogovor_new.docx...")
+
+# Используем template_dogovor.docx (конвертированный оригинал, не генерацию)
+src = 'template_dogovor.docx'
+if not os.path.exists(src):
+    print("ОШИБКА: нет template_dogovor.docx")
+    sys.exit(1)
+
+doc = Document(src)
+
+# Исправляем реквизиты исполнителя
+replace_all(doc.element.body, [
+    ('ИНН 032386861274', 'ИНН 032315540193'),
+    ('р/с 40802810000009415686', 'р/с 40802810500007432200'),
+    ('ochrvvv@mail.ru', 'msk@goodnight.show'),
+])
+
+# Номер договора (любой номер → маркер)
+replace_para_regex(doc.element.body,
+    r'(на оказание услуг № )\d+',
+    r'\1[[НОМ]]')
+
+# Дата договора (разбита по runs — ловим через полный текст параграфа)
+for para in doc.paragraphs:
+    t = ''.join(r.text for r in para.runs)
+    nw = re.sub(r'«\d+»\s*[а-яёА-ЯЁ]+ \d{4}', '«[[ДЕНЬ]]» [[МЕС_ГОД]]', t)
+    if nw != t and para.runs:
+        para.runs[0].text = nw
+        for r in para.runs[1:]: r.text = ''
+
+# Директор заказчика в шапке
+for para in doc.paragraphs:
+    if 'Генерального Директора' in para.text and 'действующего' in para.text:
+        full = ''.join(r.text for r in para.runs)
+        nw = re.sub(
+            r'Генерального Директора\s+[А-ЯЁ].+?,\s*действующего',
+            'Генерального Директора [[ДИР]], действующего', full)
+        if nw != full and para.runs:
+            para.runs[0].text = nw
+            for r in para.runs[1:]: r.text = ''
+        break
+
+# Динамические поля (длительность, срок, место, стоимость)
+for para in doc.paragraphs:
+    full = ''.join(r.text for r in para.runs)
+    nw = full
+    nw = re.sub(r'(продолжительность оказания Услуг\s*[–\-]\s*)[\d,\.]+\s*час[а-я]*;',
+                r'\1[[ДЛИТ]];', nw)
+    nw = re.sub(r'(Срок оказания Услуг\s*[–\-]\s*)\d+\s+[а-яё]+\s+\d{4}\s+года\s+[\d:]+\s*[-–]\s*[\d:]+;',
+                r'\1[[ДАТА_МЕР]];', nw)
+    nw = re.sub(r'(Место проведения:\s*).+', r'\1[[МЕСТО]]', nw)
+    nw = re.sub(r'(\bсоставляет\s+)[\d\s\xa0]+\([^)]+\)(\s+рублей)',
+                r'\1[[СУМ_Ц]] ([[СУМ_СЛ]])\2', nw)
+    if nw != full and para.runs:
+        para.runs[0].text = nw
+        for r in para.runs[1:]: r.text = ''
+
+# Реквизиты заказчика (блок 7) — маркеры
+replace_all(doc.element.body, [
+    ('ОГРН ', 'ОГРН [[ОГРН]]'),
+    ('ИНН / КПП /', 'ИНН [[ИНН]] / КПП [[КПП]]'),
+    ('Расчетный счет №', 'Расчетный счет № [[РС]]'),
+    ('к/с №', 'к/с № [[КС]]'),
+])
+replace_para_regex(doc.element.body,
+    r'(Юридический адрес:\s*).+', r'\1[[ЗАК_АДР]]')
+replace_para_regex(doc.element.body,
+    r'(Фактический адрес:\s*).+', r'\1[[ЗАК_АДР]]')
+fix_standalone(doc.element.body, 'БИК', 'БИК [[БИК]]')
+fix_standalone(doc.element.body, 'Заказчик', '[[ЗАК]]')
+
+# Также заменяем полное название компании-заказчика (шапка и блок 7)
+replace_para_regex(doc.element.body,
+    r'(Общество с ограниченной ответственностью|ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ)\s*[«""][^»""]+[»""]',
+    '[[ЗАК]]')
+
+# Подписи (блок 8)
 replace_all(doc.element.body, [
     ('Генеральный директор Заказчик', 'Генеральный директор [[ЗАК]]'),
 ])
-replace_para_regex(doc.element.body,
-    r'(_+)([А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\.)$',
-    r'\1[[ДИР_ИНИ]]')
-
-# Заменяем ФИО директора в подписях (строка только из ФИО)
 for para in doc.paragraphs:
     t = para.text.strip()
+    # Строка только из ФИО → маркер директора
     if re.match(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+$', t):
-        # Одиночная строка с ФИО — скорее всего подпись директора
         if para.runs:
             para.runs[0].text = '[[ДИР]]'
             for r in para.runs[1:]: r.text = ''
+    # Инициалы в подписи
+    if para.runs:
+        full = ''.join(r.text for r in para.runs)
+        nw = re.sub(r'([А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\.)', '[[ДИР_ИНИ]]', full)
+        if nw != full:
+            para.runs[0].text = nw
+            for r in para.runs[1:]: r.text = ''
 
 doc.save('template_dogovor_new.docx')
-print("  template_dogovor_new.docx создан!")
 
-# ─── СЧЁТ ────────────────────────────────────────────────────────────────────
+# Применяем форматирование: 10pt, убираем жёлтый, центр→лево
+fix_docx_formatting('template_dogovor_new.docx')
+sz = os.path.getsize('template_dogovor_new.docx')
+print(f"  template_dogovor_new.docx: {sz} байт — OK")
+
+
+# ════════════════════════════════════════════════════════════
+# СЧЁТ
+# ════════════════════════════════════════════════════════════
 print("Создаю template_schet_new.docx...")
 
 if not os.path.exists('template_schet.docx'):
-    print("ОШИБКА: template_schet.docx не найден в /opt/gnbot/")
+    print("ОШИБКА: нет template_schet.docx")
     sys.exit(1)
 
-doc_s = Document('template_schet.docx')
-pairs_sch = [
+doc2 = Document('template_schet.docx')
+replace_all(doc2.element.body, [
     ('ИП ЭРДЫНЕЕВ ГЭСЭР БУЯНТУЕВИЧ', 'ИП Очирова Оксана Эдуардовна'),
     ('670011, РОССИЯ, РЕСП БУРЯТИЯ, Г УЛАН-УДЭ, МКР 142-Й, -, Д 4, КВ 18',
      '670031, РОССИЯ, РЕСП БУРЯТИЯ, Г УЛАН-УДЭ, ПР СТРОИТЕЛЕЙ, Д 62, КВ 49'),
@@ -208,10 +224,11 @@ pairs_sch = [
     ('1000,00 руб.', '[[СУМ_Ц]] руб.'),
     ('сумму 1000,00', 'сумму [[СУМ_Ц]]'),
     ('Одна тысяча рублей 00 копеек', '[[СУМ_СЛ]]'),
-]
-replace_all(doc_s.element.body, pairs_sch)
-doc_s.save('template_schet_new.docx')
-print("  template_schet_new.docx создан!")
+])
+doc2.save('template_schet_new.docx')
+fix_docx_formatting('template_schet_new.docx')
+sz2 = os.path.getsize('template_schet_new.docx')
+print(f"  template_schet_new.docx: {sz2} байт — OK")
 
 print("\nГотово! Перезапусти бот:")
-print("  systemctl restart gnbot && systemctl status gnbot")
+print("systemctl restart gnbot && systemctl status gnbot")
