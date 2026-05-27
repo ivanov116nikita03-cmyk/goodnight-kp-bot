@@ -601,7 +601,19 @@ def build_docs(data):
     tmp_dir = tempfile.mkdtemp()
     results = []
 
-    # ── ДОГОВОР (XML-подход для надёжной замены разбитых runs) ─────────────────
+    # ── ДОГОВОР ────────────────────────────────────────────────────────────────
+    # Выбор шаблона и данных ФИЗ до try-блока
+    tmpl_dog = {
+        'ooo': TEMPLATE_DOGOVOR,
+        'ip':  TEMPLATE_DOGOVOR_IP,
+        'fiz': TEMPLATE_DOGOVOR_FIZ,
+    }.get(doc_type, TEMPLATE_DOGOVOR)
+    fiz_fio      = data.get('fiz_fio', '')
+    fiz_passport = data.get('fiz_passport', '')
+    fiz_issued   = data.get('fiz_issued', '')
+    fiz_code     = data.get('fiz_code', '')
+    zak_name = fiz_fio if doc_type == 'fiz' else company_name
+    bank_zak = card.get('bank', '')
     try:
         wdir1 = os.path.join(tmp_dir, 'dog_work')
         os.makedirs(wdir1)
@@ -612,20 +624,6 @@ def build_docs(data):
             xml1 = f.read()
         xml1 = normalize_docx_xml(xml1)
         xml1 = post_process_docx_xml(xml1)
-        bank_zak = card.get('bank', '')
-        bank_zak = card.get('bank', '')
-        # Выбор шаблона по типу заказчика
-        tmpl_dog = {
-            'ooo': TEMPLATE_DOGOVOR,
-            'ip':  TEMPLATE_DOGOVOR_IP,
-            'fiz': TEMPLATE_DOGOVOR_FIZ,
-        }.get(doc_type, TEMPLATE_DOGOVOR)
-        # ФИЗ данные
-        fiz_fio     = data.get('fiz_fio', '')
-        fiz_passport= data.get('fiz_passport', '')
-        fiz_issued  = data.get('fiz_issued', '')
-        fiz_code    = data.get('fiz_code', '')
-        zak_name = fiz_fio if doc_type == 'fiz' else company_name
         dog_pairs = [
             # Маркеры шаблона — только подстановка, форматирование не трогаем
             ('[[НОМ]]',       doc_num),
