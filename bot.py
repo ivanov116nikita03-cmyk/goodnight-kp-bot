@@ -5,7 +5,6 @@ import zipfile
 import shutil
 import tempfile
 import subprocess
-import json
 from datetime import date
 from docx import Document as DocxDocument
 from docx.text.paragraph import Paragraph as DocxParagraph
@@ -18,28 +17,12 @@ from telegram.error import BadRequest
 
 TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# ── Контроль доступа ──────────────────────────────────────────
-ADMIN_ID = 1179401257
-USERS_FILE = "/opt/gnbot/allowed_users.json"
-
-def load_allowed() -> set:
-    if not os.path.exists(USERS_FILE):
-        return {ADMIN_ID}
-    with open(USERS_FILE, "r") as f:
-        return set(json.load(f))
-
-def save_allowed(users: set):
-    with open(USERS_FILE, "w") as f:
-        json.dump(list(users), f)
-
-def is_allowed(user_id: int) -> bool:
-    return user_id in load_allowed()
-# ─────────────────────────────────────────────────────────────
-
 TEMPLATE_BIG   = "template_big.pptx"
 TEMPLATE_SMALL = "template_small.pptx"
 TEMPLATE_VYEZD = "template_vyezd.pptx"
-TEMPLATE_DOGOVOR = "template_dogovor_new.docx"
+TEMPLATE_DOGOVOR     = "template_dogovor_new.docx"
+TEMPLATE_DOGOVOR_IP  = "template_dogovor_new___IP.docx"
+TEMPLATE_DOGOVOR_FIZ = "template_dogovor_new___Fiz_Liz.docx"
 TEMPLATE_SCHET   = "template_schet_new.docx"
 TEMPLATE_AKT     = "template_akt.docx"
 
@@ -62,7 +45,12 @@ ISPOLNITEL = {
 DOC_MENU = 10  # menu /docs
 (DOC_NUM, DOC_DATE_EVENT, DOC_TIME, DOC_ADDR,
  DOC_PRICE, DOC_PAY_DATE, DOC_CARD_CHOICE, DOC_CARD,
- DOC_DIRECTOR, DOC_CONFIRM) = range(11, 21)  # DOC_DUR убран — считается автоматически
+ DOC_DIRECTOR, DOC_CONFIRM) = range(11, 21)
+DOC_TYPE       = 21
+DOC_FIZ_FIO    = 22
+DOC_FIZ_PASS   = 23
+DOC_FIZ_ISSUED = 24
+DOC_FIZ_CODE   = 25
 
 FIXED_DUR = {"velkom": "20 мин", "break_": "10 мин"}
 PROGRAM_BLOCKS = [
@@ -340,10 +328,17 @@ def kb_confirm():
     ])
 
 def kb_card_choice():
-    # Только текст — .doc и .txt не поддерживаются (бинарный формат)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ Вставить текст карточки", callback_data="card_text")],
         [InlineKeyboardButton("❌ Отмена",                  callback_data="cancel")],
+    ])
+
+def kb_doc_type():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏢 ООО / АО",   callback_data="type_ooo")],
+        [InlineKeyboardButton("👤 ИП",          callback_data="type_ip")],
+        [InlineKeyboardButton("🧑 Физ. лицо",  callback_data="type_fiz")],
+        [InlineKeyboardButton("❌ Отмена",      callback_data="cancel")],
     ])
 
 def kb_doc_confirm():
@@ -579,8 +574,8 @@ def build_docs(data):
     address_zak  = card.get('address', '')
     director     = data.get('director', '')
 
+    doc_type   = data.get('doc_type', 'ooo')
     doc_num    = data['doc_num']
-    # Дата договора — всегда автоматически сегодняшняя
     today      = date.today().strftime('%d.%m.%Y')
     date_event = data['date_event']
     time_event = data['time_event']
@@ -610,7 +605,7 @@ def build_docs(data):
     try:
         wdir1 = os.path.join(tmp_dir, 'dog_work')
         os.makedirs(wdir1)
-        with zipfile.ZipFile(TEMPLATE_DOGOVOR, 'r') as z:
+        with zipfile.ZipFile(tmpl_dog, 'r') as z:
             z.extractall(wdir1)
         xml_path1 = find_doc_xml(wdir1)
         with open(xml_path1, encoding='utf-8') as f:
@@ -619,6 +614,18 @@ def build_docs(data):
         xml1 = post_process_docx_xml(xml1)
         bank_zak = card.get('bank', '')
         bank_zak = card.get('bank', '')
+        # Выбор шаблона по типу заказчика
+        tmpl_dog = {
+            'ooo': TEMPLATE_DOGOVOR,
+            'ip':  TEMPLATE_DOGOVOR_IP,
+            'fiz': TEMPLATE_DOGOVOR_FIZ,
+        }.get(doc_type, TEMPLATE_DOGOVOR)
+        # ФИЗ данные
+        fiz_fio     = data.get('fiz_fio', '')
+        fiz_passport= data.get('fiz_passport', '')
+        fiz_issued  = data.get('fiz_issued', '')
+        fiz_code    = data.get('fiz_code', '')
+        zak_name = fiz_fio if doc_type == 'fiz' else company_name
         dog_pairs = [
             # Маркеры шаблона — только подстановка, форматирование не трогаем
             ('[[НОМ]]',       doc_num),
@@ -630,7 +637,12 @@ def build_docs(data):
             ('[[МЕСТО]]',     address),
             ('[[СУМ_Ц]]',     price),
             ('[[СУМ_СЛ]]',    price_short),
-            ('[[ЗАК]]',       company_name),
+            ('[[ЗАК]]',       zak_name),
+            ('[[ ЗАК]]',      zak_name),
+            ('[[ФИО]]',       fiz_fio),
+            ('[[СЕР И НОМ]]', fiz_passport),
+            ('[[КЕМ И КОГ]]', fiz_issued),
+            ('[[КОД ПОД]]',   fiz_code),
             ('[[ОГРН]]',      ogrn or '—'),
             ('[[ИНН]]',       inn),
             ('[[КПП]]',       kpp),
@@ -680,7 +692,12 @@ def build_docs(data):
             ('[[ДАТА_МЕР]]',  date_event),
             ('[[ЗАК_ПОЛН]]',  zak_polnaya),
             # Отдельные маркеры на случай если шаблон использует их раздельно
-            ('[[ЗАК]]',       company_name),
+            ('[[ЗАК]]',       zak_name),
+            ('[[ ЗАК]]',      zak_name),
+            ('[[ФИО]]',       fiz_fio),
+            ('[[СЕР И НОМ]]', fiz_passport),
+            ('[[КЕМ И КОГ]]', fiz_issued),
+            ('[[КОД ПОД]]',   fiz_code),
             ('[[ИНН]]',       inn),
             ('[[КПП]]',       kpp),
             ('[[СУМ_Ц]]',     price_fmt),
@@ -769,6 +786,9 @@ def build_docs(data):
     except Exception as e:
         raise Exception(f"Ошибка акта: {e}")
 
+    # Для физ. лица только договор
+    if doc_type == 'fiz':
+        return [results[0]], tmp_dir
     return results, tmp_dir
 
 
@@ -815,77 +835,9 @@ def _initials(fio):
 # КП Handlers
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    uid = user.id
     await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
-
-    if not is_allowed(uid):
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Одобрить", callback_data=f"approve_{uid}"),
-            InlineKeyboardButton("Отказать", callback_data=f"deny_{uid}"),
-        ]])
-        await ctx.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=(
-                f"Запрос доступа к боту\n\n"
-                f"Имя: {user.full_name}\n"
-                f"Username: @{user.username or 'нет'}\n"
-                f"ID: {uid}"
-            ),
-            reply_markup=keyboard,
-        )
-        await update.message.reply_text(
-            "Запрос на доступ отправлен администратору.\n"
-            "Ожидайте одобрения — напишите /start после получения уведомления."
-        )
-        return
-
     msg = await update.message.reply_text("Главное меню:", reply_markup=kb_main())
     track(ctx, msg.message_id)
-
-
-async def access_decision(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    action, uid_str = query.data.split("_", 1)
-    uid = int(uid_str)
-    if action == "approve":
-        users = load_allowed()
-        users.add(uid)
-        save_allowed(users)
-        await query.edit_message_text(f"Пользователь {uid} одобрен.")
-        await ctx.bot.send_message(
-            chat_id=uid,
-            text="Доступ одобрен! Напишите /start чтобы начать работу."
-        )
-    elif action == "deny":
-        await query.edit_message_text(f"Пользователь {uid} отклонён.")
-        await ctx.bot.send_message(
-            chat_id=uid,
-            text="В доступе отказано. Обратитесь к администратору."
-        )
-
-
-async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    users = load_allowed()
-    text = "Допущенные пользователи:\n" + "\n".join(str(u) for u in sorted(users))
-    await update.message.reply_text(text)
-
-
-async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if not ctx.args:
-        await update.message.reply_text("Укажите ID: /remove 12345")
-        return
-    uid = int(ctx.args[0])
-    users = load_allowed()
-    users.discard(uid)
-    save_allowed(users)
-    await update.message.reply_text(f"Пользователь {uid} удалён.")
-
 
 async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -901,11 +853,11 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         track(ctx, query.message.message_id)
         return DOC_MENU
     elif query.data == "menu_all_docs":
-        saved_mid = query.message.message_id   # сохраняем до clear()
+        saved_mid = query.message.message_id
         ctx.user_data.clear()
-        await query.edit_message_text("Номер договора (например: 11):")
-        track(ctx, saved_mid)                  # трекаем заново
-        return DOC_NUM
+        await query.edit_message_text("Тип заказчика:", reply_markup=kb_doc_type())
+        track(ctx, saved_mid)
+        return DOC_TYPE
     elif query.data == "menu_back":
         await query.edit_message_text("Главное меню:", reply_markup=kb_main())
 
@@ -1069,7 +1021,16 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # Документы Handlers
 
-# ФИХ 3: cmd_docs теперь возвращает DOC_MENU и является entry_point для doc_conv
+async def doc_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if q.data == "cancel":
+        await delete_tracked(ctx, q.message.chat_id)
+        await q.message.reply_text("Отменено.")
+        return ConversationHandler.END
+    ctx.user_data['doc_type'] = q.data.replace('type_', '')  # ooo / ip / fiz
+    await q.edit_message_text("Номер договора (например: 11):")
+    return DOC_NUM
+
 async def cmd_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
@@ -1118,11 +1079,15 @@ async def doc_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except:
         ctx.user_data['price'] = raw
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
+    if ctx.user_data.get('doc_type') == 'fiz':
+        msg = await update.message.reply_text("ФИО заказчика (полностью):")
+        track(ctx, msg.message_id)
+        return DOC_FIZ_FIO
     msg = await update.message.reply_text(
         "Карточка предприятия заказчика:",
         reply_markup=kb_card_choice()
     )
-    ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
     track(ctx, msg.message_id)
     return DOC_CARD_CHOICE
 
@@ -1164,9 +1129,58 @@ async def doc_card_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     return await _after_card_parsed(update, ctx)
 
+async def doc_fiz_fio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['fiz_fio'] = update.message.text.strip()
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    msg = await update.message.reply_text("Серия и номер паспорта (например: 4520 123456):")
+    track(ctx, msg.message_id)
+    return DOC_FIZ_PASS
+
+async def doc_fiz_pass(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['fiz_passport'] = update.message.text.strip()
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    msg = await update.message.reply_text("Кем и когда выдан (например: ОВД Москва 01.01.2020):")
+    track(ctx, msg.message_id)
+    return DOC_FIZ_ISSUED
+
+async def doc_fiz_issued(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['fiz_issued'] = update.message.text.strip()
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    msg = await update.message.reply_text("Код подразделения (например: 770-001):")
+    track(ctx, msg.message_id)
+    return DOC_FIZ_CODE
+
+async def doc_fiz_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['fiz_code'] = update.message.text.strip()
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    return await _show_fiz_summary(update, ctx)
+
+async def _show_fiz_summary(update, ctx):
+    d = ctx.user_data
+    summary = (
+        f"Проверь данные:\n\n"
+        f"Договор №{d['doc_num']}\n"
+        f"Дата мероприятия: {d['date_event']}\n"
+        f"Время: {d['time_event']}\n"
+        f"Длительность: {d.get('duration','—')}\n"
+        f"Адрес: {d['address']}\n"
+        f"Стоимость: {d['price']} руб\n"
+        f"ФИО заказчика: {d.get('fiz_fio','')}\n"
+        f"Паспорт: {d.get('fiz_passport','')}\n"
+        f"Выдан: {d.get('fiz_issued','')}\n"
+        f"Код: {d.get('fiz_code','')}"
+    )
+    msg = await update.message.reply_text(summary, reply_markup=kb_doc_confirm())
+    track(ctx, msg.message_id)
+    return DOC_CONFIRM
+
 async def _after_card_parsed(update, ctx):
-    """После разбора карточки: если директор найден — пропускаем вопрос."""
+    """После разбора карточки: если ИП — директор не нужен."""
     card = ctx.user_data.get('card', {})
+    doc_type = ctx.user_data.get('doc_type', 'ooo')
+    if doc_type == 'ip':
+        ctx.user_data['director'] = card.get('name', '')
+        return await _show_doc_summary(update, ctx)
     if card.get('director'):
         ctx.user_data['director'] = card['director']
         return await _show_doc_summary(update, ctx)
@@ -1282,21 +1296,21 @@ def main():
             DOC_TIME:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_time)],
             DOC_ADDR:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_addr)],
             DOC_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_price)],
+            DOC_TYPE:        [CallbackQueryHandler(doc_type,       pattern=r'^(type_|cancel)')],
             DOC_PAY_DATE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_pay_date)],
             DOC_CARD_CHOICE: [CallbackQueryHandler(doc_card_choice, pattern=r'^(card_text|cancel)')],
-            DOC_CARD:        [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, doc_card_text),
-            ],
+            DOC_CARD:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_card_text)],
             DOC_DIRECTOR:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_director)],
+            DOC_FIZ_FIO:     [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_fiz_fio)],
+            DOC_FIZ_PASS:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_fiz_pass)],
+            DOC_FIZ_ISSUED:  [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_fiz_issued)],
+            DOC_FIZ_CODE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_fiz_code)],
             DOC_CONFIRM:     [CallbackQueryHandler(doc_confirm, pattern=r'^(doc_confirm_|cancel)')],
         },
         fallbacks=[CommandHandler("cancel", cancel_handler)],
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("users", cmd_users))
-    app.add_handler(CommandHandler("remove", cmd_remove))
-    app.add_handler(CallbackQueryHandler(access_decision, pattern=r"^(approve|deny)_"))
     # Кнопка "Документы" из главного меню теперь обрабатывается внутри doc_conv
     app.add_handler(kp_conv)
     app.add_handler(doc_conv)
