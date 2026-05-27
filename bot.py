@@ -5,6 +5,7 @@ import zipfile
 import shutil
 import tempfile
 import subprocess
+import json
 from datetime import date
 from docx import Document as DocxDocument
 from docx.text.paragraph import Paragraph as DocxParagraph
@@ -16,6 +17,24 @@ from telegram.ext import (
 from telegram.error import BadRequest
 
 TOKEN = os.environ.get("BOT_TOKEN", "")
+
+# ── Контроль доступа ──────────────────────────────────────────
+ADMIN_ID = 1179401257
+USERS_FILE = "/opt/gnbot/allowed_users.json"
+
+def load_allowed() -> set:
+    if not os.path.exists(USERS_FILE):
+        return {ADMIN_ID}
+    with open(USERS_FILE, "r") as f:
+        return set(json.load(f))
+
+def save_allowed(users: set):
+    with open(USERS_FILE, "w") as f:
+        json.dump(list(users), f)
+
+def is_allowed(user_id: int) -> bool:
+    return user_id in load_allowed()
+# ─────────────────────────────────────────────────────────────
 
 TEMPLATE_BIG   = "template_big.pptx"
 TEMPLATE_SMALL = "template_small.pptx"
@@ -796,9 +815,77 @@ def _initials(fio):
 # КП Handlers
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    uid = user.id
     await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
+
+    if not is_allowed(uid):
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Одобрить", callback_data=f"approve_{uid}"),
+            InlineKeyboardButton("Отказать", callback_data=f"deny_{uid}"),
+        ]])
+        await ctx.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                f"Запрос доступа к боту\n\n"
+                f"Имя: {user.full_name}\n"
+                f"Username: @{user.username or 'нет'}\n"
+                f"ID: {uid}"
+            ),
+            reply_markup=keyboard,
+        )
+        await update.message.reply_text(
+            "Запрос на доступ отправлен администратору.\n"
+            "Ожидайте одобрения — напишите /start после получения уведомления."
+        )
+        return
+
     msg = await update.message.reply_text("Главное меню:", reply_markup=kb_main())
     track(ctx, msg.message_id)
+
+
+async def access_decision(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action, uid_str = query.data.split("_", 1)
+    uid = int(uid_str)
+    if action == "approve":
+        users = load_allowed()
+        users.add(uid)
+        save_allowed(users)
+        await query.edit_message_text(f"Пользователь {uid} одобрен.")
+        await ctx.bot.send_message(
+            chat_id=uid,
+            text="Доступ одобрен! Напишите /start чтобы начать работу."
+        )
+    elif action == "deny":
+        await query.edit_message_text(f"Пользователь {uid} отклонён.")
+        await ctx.bot.send_message(
+            chat_id=uid,
+            text="В доступе отказано. Обратитесь к администратору."
+        )
+
+
+async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    users = load_allowed()
+    text = "Допущенные пользователи:\n" + "\n".join(str(u) for u in sorted(users))
+    await update.message.reply_text(text)
+
+
+async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not ctx.args:
+        await update.message.reply_text("Укажите ID: /remove 12345")
+        return
+    uid = int(ctx.args[0])
+    users = load_allowed()
+    users.discard(uid)
+    save_allowed(users)
+    await update.message.reply_text(f"Пользователь {uid} удалён.")
+
 
 async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1207,6 +1294,9 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CommandHandler("remove", cmd_remove))
+    app.add_handler(CallbackQueryHandler(access_decision, pattern=r"^(approve|deny)_"))
     # Кнопка "Документы" из главного меню теперь обрабатывается внутри doc_conv
     app.add_handler(kp_conv)
     app.add_handler(doc_conv)
