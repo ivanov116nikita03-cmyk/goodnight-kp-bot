@@ -212,12 +212,12 @@ def parse_card(text):
         data['bik'] = m.group(1)
 
     # Расчётный счёт (20 цифр)
-    m = re.search(r'(?:расчетный\s+счет|р/?с|р\.\s*сч|Сч\.)\D{0,5}(\d{20})', t, re.I)
+    m = re.search(r'(?:расчетный\s+счет|р/?с|р\.\s*сч|Сч\.|Счёт|Счет)\D{0,8}(\d{20})', t, re.I)
     if m:
         data['rs'] = m.group(1)
 
     # Корреспондентский счёт (20 цифр)
-    m = re.search(r'(?:к/?с|корр\w*)\D{0,5}(\d{20})', t, re.I)
+    m = re.search(r'(?:к/?с|корр\w*)\D{0,8}(\d{20})', t, re.I)
     if m:
         data['ks'] = m.group(1)
 
@@ -521,6 +521,13 @@ def find_doc_xml(work_dir):
     raise FileNotFoundError(f"document.xml не найден в {work_dir}")
 
 
+def post_process_docx_xml(xml):
+    """Убирает только жёлтую подсветку текста."""
+    xml = re.sub(r'<w:highlight[^/]*/>', '', xml)
+    xml = re.sub(r'<w:highlight\b[^>]*/>', '', xml)
+    return xml
+
+
 def _apply_replacements(body, pairs):
     """Применяет замены во всех параграфах, включая вложенные таблицы.
     Объединяет все runs параграфа, делает замену, кладёт в первый run."""
@@ -590,29 +597,41 @@ def build_docs(data):
         with open(xml_path1, encoding='utf-8') as f:
             xml1 = f.read()
         xml1 = normalize_docx_xml(xml1)
+        xml1 = post_process_docx_xml(xml1)
+        bank_zak = card.get('bank', '')
+        bank_zak = card.get('bank', '')
         dog_pairs = [
-            ('[[НОМ]]',      doc_num),
-            ('[[ДЕНЬ]]',     today_day),
-            ('[[МЕС_ГОД]]',  today_month_year),
-            ('[[ДИР]]',      director),
-            ('[[ДЛИТ]]',     duration),
-            ('[[ДАТА_МЕР]]', date_srок),
-            ('[[МЕСТО]]',    address),
-            ('[[СУМ_Ц]]',    price),
-            ('[[СУМ_СЛ]]',   price_short),
-            ('[[ЗАК]]',      company_name),
-            ('[[ЗАК_АДР]]',  address_zak or company_name),
-            ('[[ОГРН]]',     ogrn or '—'),
-            ('[[ИНН]]',      inn),
-            ('[[КПП]]',      kpp),
-            ('[[БИК]]',      bik_zak),
-            ('[[РС]]',       rs_zak),
-            ('[[КС]]',       ks_zak),
-            ('[[ДИР_ИНИ]]',  _initials(director)),
+            # Маркеры шаблона — только подстановка, форматирование не трогаем
+            ('[[НОМ]]',       doc_num),
+            ('[[ДЕНЬ]]',      today_day),
+            ('[[МЕС_ГОД]]',   today_month_year),
+            ('[[ДИР]]',       director),
+            ('[[ДЛИТ]]',      duration),
+            ('[[ДАТА_МЕР]]',  date_srок),
+            ('[[МЕСТО]]',     address),
+            ('[[СУМ_Ц]]',     price),
+            ('[[СУМ_СЛ]]',    price_short),
+            ('[[ЗАК]]',       company_name),
+            ('[[ОГРН]]',      ogrn or '—'),
+            ('[[ИНН]]',       inn),
+            ('[[КПП]]',       kpp),
+            ('[[БИК]]',       bik_zak),
+            ('[[БАНК_ЗАК]]',  bank_zak or '—'),
+            ('[[РС]]',        rs_zak),
+            ('[[КС]]',        ks_zak),
+            ('[[ДИР_ИНИ]]',   _initials(director)),
         ]
         for old, new in dog_pairs:
             if old:
                 xml1 = xml1.replace(old, new)
+        # Адрес: если нет — удаляем строки целиком
+        if address_zak:
+            xml1 = xml1.replace('[[ЗАК_АДР]]', address_zak)
+        else:
+            xml1 = re.sub(r'<w:p[ >](?:(?!</w:p>).)*\[\[ЗАК_АДР\]\](?:(?!</w:p>).)*</w:p>',
+                          '', xml1, flags=re.DOTALL)
+        if ogrn:
+            xml1 = re.sub(re.escape(ogrn) + r'\d+', ogrn, xml1)
         with open(xml_path1, 'w', encoding='utf-8') as f:
             f.write(xml1)
         dog_path = os.path.join(tmp_dir, f'Договор_{doc_num}.docx')
@@ -635,6 +654,7 @@ def build_docs(data):
         with open(xml_path2, encoding='utf-8') as f:
             xml2 = f.read()
         xml2 = normalize_docx_xml(xml2)
+        xml2 = post_process_docx_xml(xml2)
         sch_pairs = [
             ('[[НОМ]]',       doc_num),
             ('[[ДАТА_СЧЕТ]]', date_schet_word),
@@ -646,6 +666,9 @@ def build_docs(data):
             ('[[КПП]]',       kpp),
             ('[[СУМ_Ц]]',     price_fmt),
             ('[[СУМ_СЛ]]',    price_words),
+            # Старый адрес исполнителя в шаблоне счёта
+            ('670011, РОССИЯ, РЕСП БУРЯТИЯ, Г УЛАН-УДЭ, МКР 142-Й, -, Д 4, КВ 18',
+             '670031, РОССИЯ, РЕСП БУРЯТИЯ, Г УЛАН-УДЭ, ПР СТРОИТЕЛЕЙ, Д 62, КВ 49'),
         ]
         for old, new in sch_pairs:
             if old:
@@ -675,6 +698,7 @@ def build_docs(data):
         with open(xml_path3, encoding='utf-8') as f:
             xml3 = f.read()
         xml3 = normalize_docx_xml(xml3)
+        xml3 = post_process_docx_xml(xml3)
 
         # Строки исполнителя — фиксированные
         isp_str = f'{ISPOLNITEL["name"]}, ИНН {ISPOLNITEL["inn"]}'
@@ -694,9 +718,11 @@ def build_docs(data):
             # Исполнитель (старый вариант с другим ИП)
             ('ИП Эрдынеев Гэсэр Буянтуевич, ИНН 032315540193', isp_str),
             ('ЮЛ, ИНН',  isp_str),
-            # Заказчик — подставляем company_name + ИНН вместо любого старого значения
+            # Заказчик — подставляем company_name + ИНН
             ('Заказчик, ИНН 9725189078', zak_str),
             ('Заказчик, ИНН',            zak_str),
+            # Если заказчик = исполнитель (ошибка шаблона) — заменяем
+            (f'Заказчик: {ISPOLNITEL["name"]}, ИНН {ISPOLNITEL["inn"]}', f'Заказчик: {zak_str}'),
             # Дата мероприятия и суммы
             ('10.10.2025',  date_event),
             ('12.12.2012',  date_event),
@@ -788,8 +814,10 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         track(ctx, query.message.message_id)
         return DOC_MENU
     elif query.data == "menu_all_docs":
+        saved_mid = query.message.message_id   # сохраняем до clear()
         ctx.user_data.clear()
         await query.edit_message_text("Номер договора (например: 11):")
+        track(ctx, saved_mid)                  # трекаем заново
         return DOC_NUM
     elif query.data == "menu_back":
         await query.edit_message_text("Главное меню:", reply_markup=kb_main())
