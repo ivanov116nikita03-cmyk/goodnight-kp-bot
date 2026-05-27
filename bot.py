@@ -635,8 +635,10 @@ def build_docs(data):
             ('[[МЕСТО]]',     address),
             ('[[СУМ_Ц]]',     price),
             ('[[СУМ_СЛ]]',    price_short),
+            # Строка подписи (с подчёркиванием) — показываем инициалы, не полное название
+            ('_________________[[ЗАК]]', f'_________________{ _initials(zak_name)}'),
+            ('[[ ЗАК]]',      _initials(zak_name) if doc_type in ('ip','fiz') else zak_name),
             ('[[ЗАК]]',       zak_name),
-            ('[[ ЗАК]]',      zak_name),
             ('[[ФИО]]',       fiz_fio),
             ('[[СЕР И НОМ]]', fiz_passport),
             ('[[КЕМ И КОГ]]', fiz_issued),
@@ -653,12 +655,8 @@ def build_docs(data):
         for old, new in dog_pairs:
             if old:
                 xml1 = xml1.replace(old, new)
-        # Адрес: если нет — удаляем строки целиком
-        if address_zak:
-            xml1 = xml1.replace('[[ЗАК_АДР]]', address_zak)
-        else:
-            xml1 = re.sub(r'<w:p[ >](?:(?!</w:p>).)*\[\[ЗАК_АДР\]\](?:(?!</w:p>).)*</w:p>',
-                          '', xml1, flags=re.DOTALL)
+        # Адрес: если нет — заменяем пустой строкой
+        xml1 = xml1.replace('[[ЗАК_АДР]]', address_zak or '')
         if ogrn:
             xml1 = re.sub(re.escape(ogrn) + r'\d+', ogrn, xml1)
         with open(xml_path1, 'w', encoding='utf-8') as f:
@@ -690,8 +688,10 @@ def build_docs(data):
             ('[[ДАТА_МЕР]]',  date_event),
             ('[[ЗАК_ПОЛН]]',  zak_polnaya),
             # Отдельные маркеры на случай если шаблон использует их раздельно
+            # Строка подписи (с подчёркиванием) — показываем инициалы, не полное название
+            ('_________________[[ЗАК]]', f'_________________{ _initials(zak_name)}'),
+            ('[[ ЗАК]]',      _initials(zak_name) if doc_type in ('ip','fiz') else zak_name),
             ('[[ЗАК]]',       zak_name),
-            ('[[ ЗАК]]',      zak_name),
             ('[[ФИО]]',       fiz_fio),
             ('[[СЕР И НОМ]]', fiz_passport),
             ('[[КЕМ И КОГ]]', fiz_issued),
