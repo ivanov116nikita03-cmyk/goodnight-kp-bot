@@ -635,9 +635,12 @@ def build_docs(data):
             ('[[МЕСТО]]',     address),
             ('[[СУМ_Ц]]',     price),
             ('[[СУМ_СЛ]]',    price_short),
-            # Строка подписи (с подчёркиванием) — показываем инициалы, не полное название
-            ('_________________[[ЗАК]]', f'_________________{ _initials(zak_name)}'),
-            ('[[ ЗАК]]',      _initials(zak_name) if doc_type in ('ip','fiz') else zak_name),
+            # Строка подписи — для ИП/ФИЗ убираем префикс ИП/ООО, показываем инициалы
+            ('_________________[[ЗАК]]',
+             f'_________________{ _initials(_strip_prefix(zak_name))}' if doc_type in ('ip','fiz')
+             else f'_________________{ _initials(zak_name)}'),
+            ('[[ ЗАК]]',
+             _strip_prefix(zak_name) if doc_type in ('ip','fiz') else zak_name),
             ('[[ЗАК]]',       zak_name),
             ('[[ФИО]]',       fiz_fio),
             ('[[СЕР И НОМ]]', fiz_passport),
@@ -688,9 +691,12 @@ def build_docs(data):
             ('[[ДАТА_МЕР]]',  date_event),
             ('[[ЗАК_ПОЛН]]',  zak_polnaya),
             # Отдельные маркеры на случай если шаблон использует их раздельно
-            # Строка подписи (с подчёркиванием) — показываем инициалы, не полное название
-            ('_________________[[ЗАК]]', f'_________________{ _initials(zak_name)}'),
-            ('[[ ЗАК]]',      _initials(zak_name) if doc_type in ('ip','fiz') else zak_name),
+            # Строка подписи — для ИП/ФИЗ убираем префикс ИП/ООО, показываем инициалы
+            ('_________________[[ЗАК]]',
+             f'_________________{ _initials(_strip_prefix(zak_name))}' if doc_type in ('ip','fiz')
+             else f'_________________{ _initials(zak_name)}'),
+            ('[[ ЗАК]]',
+             _strip_prefix(zak_name) if doc_type in ('ip','fiz') else zak_name),
             ('[[ЗАК]]',       zak_name),
             ('[[ФИО]]',       fiz_fio),
             ('[[СЕР И НОМ]]', fiz_passport),
@@ -822,6 +828,14 @@ def _fmt_price(price_str):
         return f"{n:,}".replace(',', '\xa0') + ',00'
     except:
         return price_str + ',00'
+
+def _strip_prefix(name):
+    """Убирает ИП, ООО, АО и т.п. из начала названия — оставляет чистое ФИО или название."""
+    import re as _re
+    return _re.sub(
+        r'^(индивидуальный\s+предприниматель|ИП|ООО|АО|ОАО|ЗАО|ПАО)\s+',
+        '', name.strip(), flags=_re.I
+    ).strip()
 
 def _initials(fio):
     parts = fio.split()
