@@ -401,13 +401,15 @@ def parse_card(text):
     # Стратегия: ищем блок начинающийся с индекса до номера дома/квартиры
     addr_found = False
     # Вариант 1: явная метка "Юридический адрес" или "Почтовый адрес"
+    ADDR_STOP = r'\s+(?:ОГРН|ИНН|КПП|БИК|Банк|Счёт|Счет|р/с|к/с|Телефон|Email|Электронная|Директор|Руководитель|Фактический\s+адрес|Почтовый\s+адрес|Юридический\s+адрес)'
     for addr_pat in [
         r'(?:Почтовый\s+адрес|Юридический\s+адрес|Юр\.?\s*адрес)\s*[:\n]?\s*(\d{6}[^\n]{10,200})',
         r'(?:^|\n)\s*(?:Почтовый\s+адрес|Юридический\s+адрес)\D{0,5}(\d{6}[^\n]{10,200})',
     ]:
         m = re.search(addr_pat, t, re.I | re.MULTILINE)
         if m:
-            data['address'] = m.group(1).strip().rstrip(',. ')
+            val = re.split(ADDR_STOP, m.group(1), flags=re.I)[0].strip().rstrip(',. ')
+            data['address'] = val
             addr_found = True
             break
     # Вариант 2: индекс + многострочный блок (индекс/город/улица/дом на разных строках)
@@ -440,10 +442,7 @@ def parse_card(text):
         if m:
             val = m.group(1).strip()
             # Обрезаем по стоп-словам которые не относятся к адресу
-            val = re.split(
-                r'\s+(?:ОГРН|ИНН|КПП|БИК|Банк|Счёт|Счет|р/с|к/с|Телефон|Email|Директор|Руководитель)\b',
-                val, flags=re.I
-            )[0].strip().rstrip(',. ')
+            val = re.split(ADDR_STOP, val, flags=re.I)[0].strip().rstrip(',. ')
             data['address'] = val
 
     return data
