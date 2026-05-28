@@ -52,17 +52,9 @@ DOC_FIZ_FIO    = 22
 DOC_FIZ_PASS   = 23
 DOC_FIZ_ISSUED = 24
 DOC_FIZ_CODE   = 25
-DOC_FORM       = 26   # анкета с полями договора
-DOC_FORM_EDIT  = 27   # редактирование одного поля анкеты
-
-# Поля анкеты договора
-DOC_FORM_FIELDS = [
-    ('doc_num',    'Номер договора',    'например: 11'),
-    ('date_event', 'Дата мероприятия',  'например: 23.05.2026'),
-    ('time_event', 'Время',             'например: 19:00 — 21:00'),
-    ('address',    'Адрес проведения',  'например: Денисовский пер., 30'),
-    ('price',      'Стоимость (руб)',   'например: 25000'),
-]
+DOC_FREE_INPUT = 26   # свободный ввод данных мероприятия одним сообщением
+DOC_FORM       = 26   # алиас для совместимости
+DOC_FORM_EDIT  = 27   # не используется
 
 # НОВЫЕ состояния для анкеты карточки
 DOC_CARD_REVIEW = 30   # показываем анкету с кнопками
@@ -1098,80 +1090,143 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── Анкета договора ──────────────────────────────────────────────────────────
+# ── Свободный ввод данных мероприятия ────────────────────────────────────────
 
-def _doc_form_text(d):
-    lines = ["📋 Заполни данные мероприятия:\n"]
-    for key, label, hint in DOC_FORM_FIELDS:
-        val = d.get(key, '')
-        icon = '✅' if val else '❌'
-        lines.append(f"{icon} {label}: {val or hint}")
-    all_filled = all(d.get(k) for k, _, _ in DOC_FORM_FIELDS)
-    if all_filled:
-        lines.append("\nВсё заполнено. Нажми ✅ Далее или исправь нужное поле.")
+FREE_INPUT_PROMPT = (
+    "Напиши данные мероприятия одним сообщением:\n\n"
+    "(номер договора, дата, время начала и конца, адрес проведения, стоимость)\n\n"
+    "Пример:\n"
+    "12, 15.06.2026, 19:00-21:00, Денисовский пер. 30 стр.1, 45000"
+)
+
+def _parse_free_input(text):
+    """Парсит свободный ввод данных мероприятия."""
+    result = {}
+    t = text.strip()
+
+    # Номер договора: первое число в начале или рядом со словом «номер/договор/№»
+    m = re.search(r'(?:^|№|номер\s*(?:договора)?|договор\s*№?)\s*(\d+)', t, re.I)
+    if m:
+        result['doc_num'] = m.group(1)
     else:
-        lines.append("\nНажми на поле чтобы заполнить.")
-    return '\n'.join(lines)
+        m = re.search(r'^\s*(\d{1,4})\s*[,;\s]', t)
+        if m and len(m.group(1)) <= 4:
+            result['doc_num'] = m.group(1)
 
-def _kb_doc_form(filled_all=False):
-    rows = []
-    for key, label, hint in DOC_FORM_FIELDS:
-        rows.append([InlineKeyboardButton(label, callback_data=f"dform_{key}")])
-    bottom = []
-    if filled_all:
-        bottom.append(InlineKeyboardButton("✅ Далее", callback_data="dform_done"))
-    bottom.append(InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
-    rows.append(bottom)
-    return InlineKeyboardMarkup(rows)
+    # Дата: дд.мм.гггг или дд/мм/гггг
+    m = re.search(r'(\d{1,2}[./]\d{1,2}[./]\d{4})', t)
+    if m:
+        result['date_event'] = m.group(1).replace('/', '.')
 
+    # Время: ЧЧ:ММ-ЧЧ:ММ или ЧЧ:ММ — ЧЧ:ММ
+    m = re.search(r'(\d{1,2}:\d{2})\s*[-—–]\s*(\d{1,2}:\d{2})', t)
+    if m:
+        result['time_event'] = f"{m.group(1)} — {m.group(2)}"
+    else:
+        m = re.search(r'(\d{1,2}:\d{2})', t)
+        if m:
+            result['time_event'] = m.group(1)
+
+    # Стоимость: число из 4-7 цифр рядом с «руб» или просто крупное число
+    m = re.search(r'(\d[\d\s]{3,8})\s*(?:руб|₽|р\.)', t, re.I)
+    if m:
+        raw = m.group(1).replace(' ', '')
+        try:
+            result['price'] = f"{int(raw):,}".replace(',', ' ')
+        except:
+            result['price'] = raw
+    else:
+        # Ищем число 4-7 цифр без метки — вероятно стоимость
+        nums = re.findall(r'(?<!\d)(\d{4,7})(?!\d)', t)
+        for n in nums:
+            # Исключаем год и индекс
+            if not (2020 <= int(n) <= 2030) and not (100000 <= int(n) <= 999999):
+                result['price'] = f"{int(n):,}".replace(',', ' ')
+                break
+
+    # Адрес: ищем после времени и стоимости — всё что осталось
+    # Удаляем уже найденные части и берём оставшийся значимый текст
+    addr_text = t
+    for pat in [
+        r'\d{1,2}[./]\d{1,2}[./]\d{4}',          # дата
+        r'\d{1,2}:\d{2}\s*[-—–]\s*\d{1,2}:\d{2}', # время диапазон
+        r'\d{1,2}:\d{2}',                           # время одиночное
+        r'\d[\d\s]{3,8}\s*(?:руб|₽|р\.)',           # стоимость с меткой
+        r'(?:^|[,;\s])(\d{1,4})(?=[,;\s])',         # номер договора
+        r'[,;]\s*\d{4,7}(?:[,;\s]|$)',              # стоимость без метки
+    ]:
+        addr_text = re.sub(pat, ' ', addr_text, flags=re.I)
+    # Убираем лишние пробелы и знаки препинания
+    addr_text = re.sub(r'[,;\s]+', ' ', addr_text).strip(' ,;')
+    # Адрес — минимум 5 символов и содержит букву
+    if len(addr_text) >= 5 and re.search(r'[а-яёa-z]', addr_text, re.I):
+        result['address'] = addr_text
+
+    return result
+
+def _missing_fields(d):
+    fields = [
+        ('doc_num',    'номер договора'),
+        ('date_event', 'дата мероприятия (дд.мм.гггг)'),
+        ('time_event', 'время (например: 19:00 — 21:00)'),
+        ('address',    'адрес проведения'),
+        ('price',      'стоимость (рублей)'),
+    ]
+    return [(k, lbl) for k, lbl in fields if not d.get(k)]
+
+async def doc_free_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает свободный ввод данных мероприятия."""
+    text = update.message.text.strip()
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    parsed = _parse_free_input(text)
+
+    # Обновляем только найденные поля
+    for k, v in parsed.items():
+        if v:
+            ctx.user_data[k] = v
+
+    missing = _missing_fields(ctx.user_data)
+    if missing:
+        miss_list = ', '.join(lbl for _, lbl in missing)
+        msg = await update.message.reply_text(
+            f"Почти готово! Не хватает: {miss_list}\n\nДопиши недостающее:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Отмена", callback_data="cancel")
+            ]])
+        )
+        track(ctx, msg.message_id)
+        return DOC_FREE_INPUT
+
+    # Всё заполнено — идём дальше
+    time_str = ctx.user_data.get('time_event', '')
+    dur = calc_duration(time_str)
+    ctx.user_data['duration'] = dur if dur else '—'
+    ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
+
+    if ctx.user_data.get('doc_type') == 'fiz':
+        msg = await update.message.reply_text("ФИО заказчика (полностью):")
+        track(ctx, msg.message_id)
+        return DOC_FIZ_FIO
+    msg = await update.message.reply_text("Вставь текст карточки предприятия заказчика:")
+    track(ctx, msg.message_id)
+    return DOC_CARD
+
+# doc_form_cb и doc_form_edit оставлены как заглушки для совместимости
 async def doc_form_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.data == "cancel":
         await delete_tracked(ctx, q.message.chat_id)
-        await q.message.reply_text("Отменено.")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+        track(ctx, msg.message_id)
         return ConversationHandler.END
-    if q.data == "dform_done":
-        # Считаем длительность из времени
-        time_str = ctx.user_data.get('time_event', '')
-        dur = calc_duration(time_str)
-        ctx.user_data['duration'] = dur if dur else '—'
-        ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
-        if ctx.user_data.get('doc_type') == 'fiz':
-            await q.edit_message_text("ФИО заказчика (полностью):")
-            return DOC_FIZ_FIO
-        await q.edit_message_text("Вставь текст карточки предприятия заказчика:")
-        return DOC_CARD
-    if q.data.startswith("dform_"):
-        field_key = q.data[len("dform_"):]
-        ctx.user_data['form_editing'] = field_key
-        label = next((lbl for k, lbl, _ in DOC_FORM_FIELDS if k == field_key), field_key)
-        hint = next((h for k, _, h in DOC_FORM_FIELDS if k == field_key), '')
-        cur = ctx.user_data.get(field_key, '')
-        cur_hint = ('Текущее: ' + cur) if cur else ('Пример: ' + hint)
-        await q.edit_message_text(
-            f"Введи «{label}»\n{cur_hint}:"
-        )
-        return DOC_FORM_EDIT
-    return DOC_FORM
+    return DOC_FREE_INPUT
 
 async def doc_form_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    val = update.message.text.strip()
-    key = ctx.user_data.get('form_editing', '')
-    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    if key == 'price':
-        raw = val.replace(' ', '')
-        try:
-            val = f"{int(''.join(filter(str.isdigit, raw))):,}".replace(',', ' ')
-        except:
-            pass
-    if key:
-        ctx.user_data[key] = val
-    all_filled = all(ctx.user_data.get(k) for k, _, _ in DOC_FORM_FIELDS)
-    text = _doc_form_text(ctx.user_data)
-    kb = _kb_doc_form(filled_all=all_filled)
-    msg = await update.message.reply_text(text, reply_markup=kb)
-    track(ctx, msg.message_id)
-    return DOC_FORM
+    return await doc_free_input(update, ctx)
 
 # ── Документы Handlers ───────────────────────────────────────────────────────
 
@@ -1182,16 +1237,14 @@ async def doc_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Отменено.")
         return ConversationHandler.END
     ctx.user_data['doc_type'] = q.data.replace('type_', '')
-    ctx.user_data.setdefault('doc_num', '')
-    ctx.user_data.setdefault('date_event', '')
-    ctx.user_data.setdefault('time_event', '')
-    ctx.user_data.setdefault('address', '')
-    ctx.user_data.setdefault('price', '')
+    ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
     await q.edit_message_text(
-        _doc_form_text(ctx.user_data),
-        reply_markup=_kb_doc_form()
+        FREE_INPUT_PROMPT,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="cancel")
+        ]])
     )
-    return DOC_FORM
+    return DOC_FREE_INPUT
 
 async def cmd_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
@@ -1547,8 +1600,10 @@ def main():
             DOC_ADDR:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_addr)],
             DOC_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_price)],
             DOC_TYPE:        [CallbackQueryHandler(doc_type, pattern=r'^(type_|cancel)')],
-            DOC_FORM:        [CallbackQueryHandler(doc_form_cb)],
-            DOC_FORM_EDIT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_form_edit)],
+            DOC_FREE_INPUT:  [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, doc_free_input),
+                CallbackQueryHandler(doc_form_cb),
+            ],
             DOC_PAY_DATE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_pay_date)],
             DOC_CARD:        [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, doc_card_text),
