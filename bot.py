@@ -52,6 +52,9 @@ DOC_FIZ_FIO    = 22
 DOC_FIZ_PASS   = 23
 DOC_FIZ_ISSUED = 24
 DOC_FIZ_CODE   = 25
+DOC_FREE_INPUT = 26   # свободный ввод данных мероприятия одним сообщением
+DOC_FORM       = 26   # алиас для совместимости
+DOC_FORM_EDIT  = 27   # не используется
 
 # НОВЫЕ состояния для анкеты карточки
 DOC_CARD_REVIEW = 30   # показываем анкету с кнопками
@@ -313,16 +316,48 @@ def parse_card(text):
             data['director'] = m.group(1).strip()
             break
 
-    # АДРЕС: с почтового индекса (6 цифр)
+    # АДРЕС: собираем полный адрес: индекс + город + улица + дом/квартира
+    # Стратегия: ищем блок начинающийся с индекса до номера дома/квартиры
+    addr_found = False
+    # Вариант 1: явная метка "Юридический адрес" или "Почтовый адрес"
     for addr_pat in [
-        r'(?:Юридический\s+адрес|Юр\.?\s*адрес)\s*[:\n]?\s*(\d{6}[^\n]{10,150})',
-        r'(?:^|\n)\s*Адрес[^\n]{0,20}?(\d{6}[^\n]{10,150})',
-        r'(\d{6},?\s*(?:РОССИЯ|Россия|г\.|город|Г\.?\s|ул\.|пр-кт)[^\n]{10,150})',
+        r'(?:Почтовый\s+адрес|Юридический\s+адрес|Юр\.?\s*адрес)\s*[:\n]?\s*(\d{6}[^\n]{10,200})',
+        r'(?:^|\n)\s*(?:Почтовый\s+адрес|Юридический\s+адрес)\D{0,5}(\d{6}[^\n]{10,200})',
     ]:
         m = re.search(addr_pat, t, re.I | re.MULTILINE)
         if m:
             data['address'] = m.group(1).strip().rstrip(',. ')
+            addr_found = True
             break
+    # Вариант 2: индекс + многострочный блок (индекс/город/улица/дом на разных строках)
+    if not addr_found:
+        m = re.search(
+            r'(?:^|\n)\s*(?:Индекс|Почтовый\s+индекс)\s*[:\n]?\s*(\d{6})',
+            t, re.I | re.MULTILINE
+        )
+        if m:
+            # Берём текст начиная с индекса, собираем строки до пустой строки или нерелевантного поля
+            start = m.start(1)
+            block = t[start:start+400]
+            # Убираем переносы строк — склеиваем в одну строку
+            lines = [l.strip() for l in block.split('\n') if l.strip()]
+            addr_parts = []
+            for line in lines:
+                # Стоп-слова: явно не адрес
+                if re.match(r'^(?:Телефон|Email|Электронная|ОГРН|ИНН|КПП|БИК|Банк|Счёт|Счет|р/с|к/с|ОКВЭД|Данные|Серия|Руководитель|Директор)', line, re.I):
+                    break
+                addr_parts.append(line)
+                # Если нашли дом/квартиру — стоп
+                if re.search(r'(?:д\.?\s*\d|дом\s*\d|кв\.?\s*\d|квартира\s*\d)', line, re.I):
+                    break
+            if addr_parts:
+                data['address'] = ', '.join(addr_parts).strip().rstrip(',. ')
+                addr_found = True
+    # Вариант 3: одна строка с индексом и городом
+    if not addr_found:
+        m = re.search(r'(\d{6},?\s*(?:РОССИЯ|Россия|г\.|город|Г\.?\s|ул\.|пр-кт)[^\n]{10,200})', t, re.I)
+        if m:
+            data['address'] = m.group(1).strip().rstrip(',. ')
 
     return data
 
@@ -418,6 +453,8 @@ def kb_card_review(card):
     """
     rows = []
     for key, label in CARD_FIELDS:
+        if key not in card:
+            continue
         val = card.get(key, '')
         icon = '✅' if val else '❌'
         display = (val[:38] + '…') if val and len(val) > 38 else (val or 'не найдено')
@@ -1028,7 +1065,12 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = q.message.chat_id
     if q.data in ('confirm_no', 'cancel'):
         await delete_tracked(ctx, chat_id)
-        await q.message.reply_text("Отменено.")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+        track(ctx, msg.message_id)
         return ConversationHandler.END
     await q.edit_message_text("Готовлю КП...")
     try:
@@ -1048,6 +1090,144 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ── Свободный ввод данных мероприятия ────────────────────────────────────────
+
+FREE_INPUT_PROMPT = (
+    "Напиши данные мероприятия одним сообщением:\n\n"
+    "(номер договора, дата, время начала и конца, адрес проведения, стоимость)\n\n"
+    "Пример:\n"
+    "12, 15.06.2026, 19:00-21:00, Денисовский пер. 30 стр.1, 45000"
+)
+
+def _parse_free_input(text):
+    """Парсит свободный ввод данных мероприятия."""
+    result = {}
+    t = text.strip()
+
+    # Номер договора: первое число в начале или рядом со словом «номер/договор/№»
+    m = re.search(r'(?:^|№|номер\s*(?:договора)?|договор\s*№?)\s*(\d+)', t, re.I)
+    if m:
+        result['doc_num'] = m.group(1)
+    else:
+        m = re.search(r'^\s*(\d{1,4})\s*[,;\s]', t)
+        if m and len(m.group(1)) <= 4:
+            result['doc_num'] = m.group(1)
+
+    # Дата: дд.мм.гггг или дд/мм/гггг
+    m = re.search(r'(\d{1,2}[./]\d{1,2}[./]\d{4})', t)
+    if m:
+        result['date_event'] = m.group(1).replace('/', '.')
+
+    # Время: ЧЧ:ММ-ЧЧ:ММ или ЧЧ:ММ — ЧЧ:ММ
+    m = re.search(r'(\d{1,2}:\d{2})\s*[-—–]\s*(\d{1,2}:\d{2})', t)
+    if m:
+        result['time_event'] = f"{m.group(1)} — {m.group(2)}"
+    else:
+        m = re.search(r'(\d{1,2}:\d{2})', t)
+        if m:
+            result['time_event'] = m.group(1)
+
+    # Стоимость: число из 4-7 цифр рядом с «руб» или просто крупное число
+    m = re.search(r'(\d[\d\s]{3,8})\s*(?:руб|₽|р\.)', t, re.I)
+    if m:
+        raw = m.group(1).replace(' ', '')
+        try:
+            result['price'] = f"{int(raw):,}".replace(',', ' ')
+        except:
+            result['price'] = raw
+    else:
+        # Ищем число 4-7 цифр без метки — вероятно стоимость
+        nums = re.findall(r'(?<!\d)(\d{4,7})(?!\d)', t)
+        for n in nums:
+            # Исключаем год и индекс
+            if not (2020 <= int(n) <= 2030) and not (100000 <= int(n) <= 999999):
+                result['price'] = f"{int(n):,}".replace(',', ' ')
+                break
+
+    # Адрес: ищем после времени и стоимости — всё что осталось
+    # Удаляем уже найденные части и берём оставшийся значимый текст
+    addr_text = t
+    for pat in [
+        r'\d{1,2}[./]\d{1,2}[./]\d{4}',          # дата
+        r'\d{1,2}:\d{2}\s*[-—–]\s*\d{1,2}:\d{2}', # время диапазон
+        r'\d{1,2}:\d{2}',                           # время одиночное
+        r'\d[\d\s]{3,8}\s*(?:руб|₽|р\.)',           # стоимость с меткой
+        r'(?:^|[,;\s])(\d{1,4})(?=[,;\s])',         # номер договора
+        r'[,;]\s*\d{4,7}(?:[,;\s]|$)',              # стоимость без метки
+    ]:
+        addr_text = re.sub(pat, ' ', addr_text, flags=re.I)
+    # Убираем лишние пробелы и знаки препинания
+    addr_text = re.sub(r'[,;\s]+', ' ', addr_text).strip(' ,;')
+    # Адрес — минимум 5 символов и содержит букву
+    if len(addr_text) >= 5 and re.search(r'[а-яёa-z]', addr_text, re.I):
+        result['address'] = addr_text
+
+    return result
+
+def _missing_fields(d):
+    fields = [
+        ('doc_num',    'номер договора'),
+        ('date_event', 'дата мероприятия (дд.мм.гггг)'),
+        ('time_event', 'время (например: 19:00 — 21:00)'),
+        ('address',    'адрес проведения'),
+        ('price',      'стоимость (рублей)'),
+    ]
+    return [(k, lbl) for k, lbl in fields if not d.get(k)]
+
+async def doc_free_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает свободный ввод данных мероприятия."""
+    text = update.message.text.strip()
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    parsed = _parse_free_input(text)
+
+    # Обновляем только найденные поля
+    for k, v in parsed.items():
+        if v:
+            ctx.user_data[k] = v
+
+    missing = _missing_fields(ctx.user_data)
+    if missing:
+        miss_list = ', '.join(lbl for _, lbl in missing)
+        msg = await update.message.reply_text(
+            f"Почти готово! Не хватает: {miss_list}\n\nДопиши недостающее:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Отмена", callback_data="cancel")
+            ]])
+        )
+        track(ctx, msg.message_id)
+        return DOC_FREE_INPUT
+
+    # Всё заполнено — идём дальше
+    time_str = ctx.user_data.get('time_event', '')
+    dur = calc_duration(time_str)
+    ctx.user_data['duration'] = dur if dur else '—'
+    ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
+
+    if ctx.user_data.get('doc_type') == 'fiz':
+        msg = await update.message.reply_text("ФИО заказчика (полностью):")
+        track(ctx, msg.message_id)
+        return DOC_FIZ_FIO
+    msg = await update.message.reply_text("Вставь текст карточки предприятия заказчика:")
+    track(ctx, msg.message_id)
+    return DOC_CARD
+
+# doc_form_cb и doc_form_edit оставлены как заглушки для совместимости
+async def doc_form_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if q.data == "cancel":
+        await delete_tracked(ctx, q.message.chat_id)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+        track(ctx, msg.message_id)
+        return ConversationHandler.END
+    return DOC_FREE_INPUT
+
+async def doc_form_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    return await doc_free_input(update, ctx)
+
 # ── Документы Handlers ───────────────────────────────────────────────────────
 
 async def doc_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1057,8 +1237,14 @@ async def doc_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Отменено.")
         return ConversationHandler.END
     ctx.user_data['doc_type'] = q.data.replace('type_', '')
-    await q.edit_message_text("Номер договора (например: 11):")
-    return DOC_NUM
+    ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
+    await q.edit_message_text(
+        FREE_INPUT_PROMPT,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="cancel")
+        ]])
+    )
+    return DOC_FREE_INPUT
 
 async def cmd_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
@@ -1111,36 +1297,26 @@ async def doc_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         track(ctx, msg.message_id)
         return DOC_FIZ_FIO
     msg = await update.message.reply_text(
-        "Карточка предприятия заказчика:",
-        reply_markup=kb_card_choice()
+        "Вставь текст карточки предприятия заказчика:"
     )
     track(ctx, msg.message_id)
-    return DOC_CARD_CHOICE
+    return DOC_CARD
 
 async def doc_pay_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['today'] = update.message.text.strip()
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text(
-        "Карточка предприятия заказчика:",
-        reply_markup=kb_card_choice()
+        "Вставь текст карточки предприятия заказчика:"
     )
     track(ctx, msg.message_id)
-    return DOC_CARD_CHOICE
-
-async def doc_card_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    if q.data == "cancel":
-        await delete_tracked(ctx, q.message.chat_id)
-        await q.message.reply_text("Отменено.")
-        return ConversationHandler.END
-    await q.edit_message_text(
-        "Вставь текст карточки предприятия (скопируй из Word или любого документа):"
-    )
     return DOC_CARD
 
 async def doc_card_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    ctx.user_data['card'] = parse_card(text)
+    card = parse_card(text)
+    if ctx.user_data.get('doc_type') == 'ip':
+        card.pop('kpp', None)
+    ctx.user_data['card'] = card
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     return await _show_card_review(update, ctx)
 
@@ -1151,7 +1327,10 @@ async def doc_card_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     with open(tmp, encoding='utf-8', errors='ignore') as f:
         text = f.read()
     os.remove(tmp)
-    ctx.user_data['card'] = parse_card(text)
+    card = parse_card(text)
+    if ctx.user_data.get('doc_type') == 'ip':
+        card.pop('kpp', None)
+    ctx.user_data['card'] = card
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     return await _show_card_review(update, ctx)
 
@@ -1162,10 +1341,12 @@ def _card_review_text(card):
     """Текст анкеты для отображения над кнопками."""
     lines = ["Проверь данные карточки:\n"]
     for key, label in CARD_FIELDS:
+        if key not in card:
+            continue
         val = card.get(key, '')
         icon = '✅' if val else '❌'
         lines.append(f"{icon} {label}: {val or 'не найдено'}")
-    lines.append("\nНажми ✏️ рядом с полем чтобы исправить, или подтверди.")
+    lines.append("\nНажми на поле чтобы исправить, или подтверди.")
     return '\n'.join(lines)
 
 async def _show_card_review(update_or_query, ctx, is_edit=False):
@@ -1332,7 +1513,12 @@ async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = q.message.chat_id
     if q.data in ('doc_confirm_no', 'cancel'):
         await delete_tracked(ctx, chat_id)
-        await q.message.reply_text("Отменено.")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+        track(ctx, msg.message_id)
         return ConversationHandler.END
     await q.edit_message_text("Готовлю документы...")
     try:
@@ -1353,6 +1539,20 @@ async def cancel_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменено. Напиши /start")
     return ConversationHandler.END
 
+
+async def global_doc_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if q.data in ("doc_confirm_no", "cancel"):
+        await delete_tracked(ctx, q.message.chat_id)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+        track(ctx, msg.message_id)
+    elif q.data == "doc_confirm_yes":
+        await q.answer("Начни заново через меню.", show_alert=True)
 
 async def post_init(app):
     await app.bot.set_my_commands([
@@ -1400,8 +1600,11 @@ def main():
             DOC_ADDR:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_addr)],
             DOC_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_price)],
             DOC_TYPE:        [CallbackQueryHandler(doc_type, pattern=r'^(type_|cancel)')],
+            DOC_FREE_INPUT:  [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, doc_free_input),
+                CallbackQueryHandler(doc_form_cb),
+            ],
             DOC_PAY_DATE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_pay_date)],
-            DOC_CARD_CHOICE: [CallbackQueryHandler(doc_card_choice, pattern=r'^(card_text|cancel)')],
             DOC_CARD:        [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, doc_card_text),
                 MessageHandler(filters.Document.ALL, doc_card_file),
@@ -1427,6 +1630,7 @@ def main():
     app.add_handler(kp_conv)
     app.add_handler(doc_conv)
     app.add_handler(CallbackQueryHandler(menu_cb, pattern=r'^menu_back$'))
+    app.add_handler(CallbackQueryHandler(global_doc_confirm_cb, pattern=r'^(doc_confirm_no|doc_confirm_yes|cancel)$'))
 
     print("Bot started...")
     app.run_polling()
