@@ -163,6 +163,73 @@ def num_to_words(n):
     words = words[0].upper() + words[1:] if words else ''
     return f"{words} рублей 00 копеек"
 
+def make_genitive_fio(fio):
+    """Склоняет полное ФИО (Фамилия Имя Отчество) в родительный падеж."""
+    parts = fio.strip().split()
+    if len(parts) < 2:
+        return fio
+
+    # Определяем пол по отчеству (3-е слово) или окончанию фамилии
+    gender = 'unknown'
+    if len(parts) >= 3:
+        ot = parts[2].lower()
+        if ot.endswith('ович') or ot.endswith('евич'):
+            gender = 'm'
+        elif ot.endswith('овна') or ot.endswith('евна') or ot.endswith('инична'):
+            gender = 'f'
+    if gender == 'unknown':
+        fam = parts[0].lower()
+        if fam.endswith('ов') or fam.endswith('ев') or fam.endswith('ин') or fam.endswith('ын'):
+            gender = 'm'
+        elif fam.endswith('ова') or fam.endswith('ева') or fam.endswith('ина'):
+            gender = 'f'
+
+    result = []
+    for i, part in enumerate(parts):
+        low = part.lower()
+
+        # ОТЧЕСТВО
+        if i == 2:
+            if low.endswith('ович') or low.endswith('евич'):
+                result.append(part + 'а'); continue
+            if low.endswith('овна') or low.endswith('евна') or low.endswith('инична'):
+                result.append(part[:-1] + 'ы'); continue
+            result.append(part); continue
+
+        # ИМЯ — расширенный список с неправильными формами
+        if i == 1:
+            irregulars = {
+                'лев': 'Льва', 'пётр': 'Петра', 'павел': 'Павла',
+                'семён': 'Семёна', 'семен': 'Семёна',
+            }
+            if low in irregulars:
+                result.append(irregulars[low]); continue
+            # Мужские на -ий -> -ия (Дмитрий, Василий, Георгий)
+            if gender == 'm' and low.endswith('ий'):
+                result.append(part[:-2] + 'ия'); continue
+            result.append(make_genitive(part)); continue
+
+        # ФАМИЛИЯ
+        # -ский/-цкий (муж -> -ского, жен -> -ской)
+        if low.endswith('ский') or low.endswith('цкий'):
+            if gender == 'f':
+                result.append(part[:-2] + 'ой')
+            else:
+                result.append(part[:-2] + 'ого')
+            continue
+        if low.endswith('ская') or low.endswith('цкая'):
+            result.append(part[:-2] + 'ой'); continue
+        # Мужские на -ов/-ев/-ин/-ын/-ан/-он
+        if re.search(r'(?:ов|ев|ин|ын|он|ан)$', low) and gender != 'f':
+            result.append(part + 'а'); continue
+        # Женские на -ова/-ева/-ина -> -овой/-евой/-иной
+        if re.search(r'(?:ова|ева|ина|ына)$', low):
+            result.append(part[:-1] + 'ой'); continue
+        # Общий случай через make_genitive
+        result.append(make_genitive(part))
+
+    return ' '.join(result)
+
 def make_genitive(name):
     n = name.strip()
     low = n.lower()
@@ -242,6 +309,11 @@ def parse_card(text):
     if m:
         data['bik'] = m.group(1)
     if not data.get('bik'):
+        # Слитное написание: "БИК044525104" или "БИКбанка044525104"
+        m = re.search(r'БИК\s*(?:банка)?\s*(04\d{7})(?!\d)', t, re.I)
+        if m:
+            data['bik'] = m.group(1)
+    if not data.get('bik'):
         # Без метки: 9 цифр начиная с 04, рядом слово "банк" или "бик"
         for mm in re.finditer(r'(?<!\d)(04\d{7})(?!\d)', t):
             ctx = t[max(0, mm.start()-30):mm.start()+12].lower()
@@ -288,16 +360,23 @@ def parse_card(text):
                 data['ks'] = m.group(1)
 
     # БАНК: строка рядом с меткой, не цифры
+    # Порядок важен: сначала точные метки, потом общий "Банк"
     bank_patterns = [
-        r'(?:Наименование\s+банка|Банк\s+получателя)\s*[:\n]?\s*([^\n\d]{3,100}?)(?=\n|ИНН|БИК|$)',
-        r'(?:^|\n)\s*Банк\s*[:\n]\s*([^\n]{3,100}?)(?=\n|$)',
-        r'(?:^|\n)\s*Банк\s+((?:ПАО|АО|ОАО|ЗАО|НКО|КБ)\s*[«"]?[^\n«"]{2,80}[»"]?)(?=\n|$)',
-        r'Банк\s*:\s*([А-ЯЁA-Za-z][^\n]{2,100}?)(?=\n|ИНН|БИК|$)',
+        # "Наименование банка" / "Банк получателя" с явным разделителем
+        r'(?:Наименование\s+банка|Банк\s+получателя)\s*[:\n]\s*([^\n]{3,100}?)(?=\n|ИНН|БИК|$)',
+        # "Банк:" с двоеточием
+        r'(?:^|\n)\s*Банк\s*:\s*([^\n]{3,100}?)(?=\n|$)',
+        # "Банк Название банка ТОЧКА..." — пропускаем "Название банка"
+        r'(?:^|\n|\s)Банк\s+(?:Название\s+банка\s+)?([А-ЯЁ«"ТОЧКА][^\n]{2,100}?)(?=\s+БИК|\s+ИНН|\s+Расч|\s*$)',
+        # Просто "Банк" + известные аббревиатуры
+        r'(?:^|\n)\s*Банк\s+((?:ПАО|АО|ОАО|ЗАО|НКО|КБ|ТОЧКА)\s*[«"]?[^\n«"]{2,80}[»"]?)(?=\n|БИК|$)',
     ]
     for bp in bank_patterns:
         m = re.search(bp, t, re.I | re.MULTILINE | re.DOTALL)
         if m:
             val = m.group(1).strip().rstrip(',. ')
+            # Убираем "Название банка" если вдруг попало в начало
+            val = re.sub(r'^(?:Название\s+банка\s+)', '', val, flags=re.I).strip()
             if len(val) >= 3 and not re.match(r'^\d+$', val) and not val[:2].isdigit():
                 data['bank'] = val[:100]
                 break
@@ -716,7 +795,7 @@ def build_docs(data):
             ('[[НОМ]]',       doc_num),
             ('[[ДЕНЬ]]',      today_day),
             ('[[МЕС_ГОД]]',   today_month_year),
-            ('[[ДИР]]',       director),
+            ('[[ДИР]]',       make_genitive_fio(director)),
             ('[[ДЛИТ]]',      duration),
             ('[[ДАТА_МЕР]]',  date_srок),
             ('[[МЕСТО]]',     address),
