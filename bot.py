@@ -186,12 +186,23 @@ def make_genitive(name):
     return name
 
 def parse_card(text):
+    """
+    Парсит карточку предприятия. Использует точные форматы полей:
+    ИНН: 10 цифр (ЮЛ) или 12 цифр (ИП/ФЛ)
+    КПП: ровно 9 цифр
+    ОГРН: 13 цифр (ЮЛ) или 15 цифр (ИП)
+    БИК: ровно 9 цифр, ВСЕГДА начинается с 04
+    Р/с: ровно 20 цифр, начинается с 405/406/407/408/423/655
+    К/с: ровно 20 цифр, ВСЕГДА начинается с 301
+    """
     data = {}
     t = text.strip()
+
+    # НАЗВАНИЕ
     m = re.search(
         r'((?:ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ|АКЦИОНЕРНОЕ ОБЩЕСТВО|'
         r'ПУБЛИЧНОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО|ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ|'
-        r'ООО|ОАО|ЗАО|АО|ПАО|ИП)\s*[«""]?[А-ЯЁA-Za-z0-9«""\'«][^»""\n]{0,80}[»""]?)',
+        r'ООО|ОАО|ЗАО|АО|ПАО|ИП)\s*[«""]?[А-ЯЁA-Za-z0-9][^»""\n]{0,80}[»""]?)',
         t, re.I
     )
     if m:
@@ -201,44 +212,118 @@ def parse_card(text):
         if (len(first_line) > 5
                 and not re.match(r'^(ИНН|КПП|ОГРН|БИК|р/?с|к/?с|Банк|Счёт|Счет|Адрес)', first_line, re.I)):
             data['name'] = first_line.rstrip(',. ')
-    for m in re.finditer(r'ИНН\D{0,10}(\d{10,12})', t, re.I):
-        val = m.group(1)
-        ctx_before = t[max(0,m.start()-20):m.start()].lower()
+
+    # ИНН: 10 или 12 цифр, НЕ берём ИНН банка
+    for m in re.finditer(r'(?<!\d)ИНН\s*[:/]?\s*(\d{10}|\d{12})(?!\d)', t, re.I):
+        ctx_before = t[max(0, m.start()-30):m.start()].lower()
         if 'банк' not in ctx_before:
-            data['inn'] = val
+            data['inn'] = m.group(1)
             break
-    m = re.search(r'КПП\D{0,3}(\d{9})', t, re.I)
-    if m: data['kpp'] = m.group(1)
-    m = re.search(r'ОГРН\D{0,5}(\d{13,15})', t, re.I)
-    if m: data['ogrn'] = m.group(1)
-    m = re.search(r'БИК\D{0,10}(\d{9})', t, re.I)
-    if m: data['bik'] = m.group(1)
-    m = re.search(r'(?:расчетный\s+счет|р/?с|р\.\s*сч|Сч\.|Счёт|Счет)\D{0,10}(\d{20})', t, re.I)
-    if m: data['rs'] = m.group(1)
-    m = re.search(r'(?:корреспондентский\s+счет|к/?с|корр\w*)\D{0,10}(\d{20})', t, re.I)
-    if m: data['ks'] = m.group(1)
-    m = re.search(r'(?:Наименование\s+банка|Банк\s+получателя|(?<!ИНН\s)(?<!БИК\s)Банк)\s*[:\n]?\s*(.{3,80}?)(?:\n|ИНН|БИК|$)', t, re.I | re.DOTALL)
-    if m: data['bank'] = m.group(1).strip()[:100]
+
+    # КПП: ровно 9 цифр
+    m = re.search(r'КПП\s*[:/]?\s*(\d{9})(?!\d)', t, re.I)
+    if m:
+        data['kpp'] = m.group(1)
+    if not data.get('kpp'):
+        m = re.search(r'(?:ИНН\s*\d{10,12}[,/\s]+КПП\s*[:/]?\s*|/КПП[:/]?\s*)(\d{9})(?!\d)', t, re.I)
+        if m:
+            data['kpp'] = m.group(1)
+
+    # ОГРН: 13 цифр (ЮЛ) или 15 цифр (ИП)
+    m = re.search(r'ОГРН\w*\s*[:/]?\s*(\d{13}|\d{15})(?!\d)', t, re.I)
+    if m:
+        data['ogrn'] = m.group(1)
+
+    # БИК: ровно 9 цифр, ВСЕГДА начинается с 04
+    m = re.search(r'БИК\s*[:/]?\s*(04\d{7})(?!\d)', t, re.I)
+    if m:
+        data['bik'] = m.group(1)
+    if not data.get('bik'):
+        # Без метки: 9 цифр начиная с 04, рядом слово "банк" или "бик"
+        for mm in re.finditer(r'(?<!\d)(04\d{7})(?!\d)', t):
+            ctx = t[max(0, mm.start()-30):mm.start()+12].lower()
+            if 'бик' in ctx or 'банк' in ctx:
+                data['bik'] = mm.group(1)
+                break
+
+    # Р/С: ровно 20 цифр, начинается с 405/406/407/408/423/655
+    rs_pref = r'(?:407|408|405|406|423|655)'
+    m = re.search(
+        r'(?:расчет\w*\s*счет|р\s*/\s*с|р\.с\.|р/счет|р/сч)\s*[:/]?\s*(' + rs_pref + r'\d{17})(?!\d)',
+        t, re.I
+    )
+    if m:
+        data['rs'] = m.group(1)
+    if not data.get('rs'):
+        for mm in re.finditer(r'(?<!\d)(' + rs_pref + r'\d{17})(?!\d)', t):
+            val = mm.group(1)
+            ctx = t[max(0, mm.start()-40):mm.start()+22].lower()
+            if any(x in ctx for x in ['р/с', 'р.с', 'расч', 'счет', 'сч.']):
+                data['rs'] = val
+                break
+        if not data.get('rs'):
+            m = re.search(r'(?:р\s*/\s*с|р\.с\.|расч\w*\s+счет)\s*[:/]?\s*(\d{20})(?!\d)', t, re.I)
+            if m:
+                data['rs'] = m.group(1)
+
+    # К/С: ровно 20 цифр, ВСЕГДА начинается с 301
+    m = re.search(
+        r'(?:корр\w*\s*счет|к\s*/\s*с|к\.с\.|к/счет|к/сч)\s*[:/]?\s*(301\d{17})(?!\d)',
+        t, re.I
+    )
+    if m:
+        data['ks'] = m.group(1)
+    if not data.get('ks'):
+        for mm in re.finditer(r'(?<!\d)(301\d{17})(?!\d)', t):
+            ctx = t[max(0, mm.start()-40):mm.start()+22].lower()
+            if any(x in ctx for x in ['к/с', 'к.с', 'корр']):
+                data['ks'] = mm.group(1)
+                break
+        if not data.get('ks'):
+            m = re.search(r'(?:к\s*/\s*с|корр\w*\s+счет)\s*[:/]?\s*(\d{20})(?!\d)', t, re.I)
+            if m:
+                data['ks'] = m.group(1)
+
+    # БАНК: строка рядом с меткой, не цифры
+    bank_patterns = [
+        r'(?:Наименование\s+банка|Банк\s+получателя)\s*[:\n]?\s*([^\n\d]{3,100}?)(?=\n|ИНН|БИК|$)',
+        r'(?:^|\n)\s*Банк\s*[:\n]\s*([^\n]{3,100}?)(?=\n|$)',
+        r'(?:^|\n)\s*Банк\s+((?:ПАО|АО|ОАО|ЗАО|НКО|КБ)\s*[«"]?[^\n«"]{2,80}[»"]?)(?=\n|$)',
+        r'Банк\s*:\s*([А-ЯЁA-Za-z][^\n]{2,100}?)(?=\n|ИНН|БИК|$)',
+    ]
+    for bp in bank_patterns:
+        m = re.search(bp, t, re.I | re.MULTILINE | re.DOTALL)
+        if m:
+            val = m.group(1).strip().rstrip(',. ')
+            if len(val) >= 3 and not re.match(r'^\d+$', val) and not val[:2].isdigit():
+                data['bank'] = val[:100]
+                break
+
+    # ДИРЕКТОР
     for pat in [
-        r'(?:Генеральный\s+директор|Ген\.?\s*дир\.?)\s*[:/\n]?\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
+        r'(?:Генеральный\s+директор|Ген\.?\s*дир\.?)\s*[:/]?\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
         r'(?:Генеральный\s+директор|Ген\.?\s*дир\.?)([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
         r'(?:Генеральный\s+директор|Директор)[^\n]*\n\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?)',
         r'(?:Директор|директор)\s*/[^/]*/\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
         r'(?:^|\n)\s*Директор\s+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
+        r'(?:Индивидуальный предприниматель|ИП)\s+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)',
     ]:
         m = re.search(pat, t, re.I | re.MULTILINE)
         if m:
             data['director'] = m.group(1).strip()
             break
+
+    # АДРЕС: с почтового индекса (6 цифр)
     for addr_pat in [
-        r'(?:Юридический\s+адрес)\D{0,20}?(\d{6}[^\n]{10,120})',
-        r'(?:^|\n)\s*Адрес\D{0,10}?(\d{6}[^\n]{10,120})',
-        r'(\d{6},?\s*(?:РОССИЯ|Россия|г\.|город|Г\s)[^\n]{10,120})',
+        r'(?:Юридический\s+адрес|Юр\.?\s*адрес)\s*[:\n]?\s*(\d{6}[^\n]{10,150})',
+        r'(?:^|\n)\s*Адрес[^\n]{0,20}?(\d{6}[^\n]{10,150})',
+        r'(\d{6},?\s*(?:РОССИЯ|Россия|г\.|город|Г\.?\s|ул\.|пр-кт)[^\n]{10,150})',
     ]:
         m = re.search(addr_pat, t, re.I | re.MULTILINE)
         if m:
             data['address'] = m.group(1).strip().rstrip(',. ')
             break
+
     return data
 
 
@@ -329,20 +414,18 @@ def kb_doc_confirm():
 def kb_card_review(card):
     """
     Клавиатура анкеты карточки.
-    Каждое поле: [✅/❌ Название: значение] [✏️ изменить]
-    Внизу: кнопка "Подтвердить".
+    Вся строка кликабельна: нажатие открывает редактирование поля.
     """
     rows = []
     for key, label in CARD_FIELDS:
         val = card.get(key, '')
         icon = '✅' if val else '❌'
-        display = (val[:30] + '…') if val and len(val) > 30 else (val or 'не найдено')
+        display = (val[:38] + '…') if val and len(val) > 38 else (val or 'не найдено')
         rows.append([
             InlineKeyboardButton(
                 f"{icon} {label}: {display}",
-                callback_data=f"cardview_{key}"   # нажатие на строку тоже открывает редактирование
+                callback_data=f"cardedit_{key}"
             ),
-            InlineKeyboardButton("✏️", callback_data=f"cardedit_{key}"),
         ])
     rows.append([
         InlineKeyboardButton("✅ Подтвердить", callback_data="card_ok"),
@@ -1119,9 +1202,9 @@ async def doc_card_review_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Пользователь подтвердил карточку, идём дальше
         return await _after_card_confirmed(q.message, ctx)
 
-    if data.startswith("cardedit_") or data.startswith("cardview_"):
+    if data.startswith("cardedit_"):
         # Нажали на поле — запрашиваем новое значение
-        field_key = data.split("_", 1)[1]
+        field_key = data[len("cardedit_"):]
         ctx.user_data['editing_field'] = field_key
         # Находим метку поля
         label = next((lbl for k, lbl in CARD_FIELDS if k == field_key), field_key)
