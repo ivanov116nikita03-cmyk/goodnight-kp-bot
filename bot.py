@@ -1456,10 +1456,11 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 FREE_INPUT_PROMPT = (
     "Напиши данные мероприятия одним сообщением.\n"
-    "Разделяй каждый пункт символом \\  (обратный слеш)\n\n"
+    "Разделяй пункты символом  \\  (обратный слеш) — обязательно с пробелами по бокам!\n\n"
     "Порядок: номер \\ дата \\ время \\ адрес \\ стоимость\n\n"
     "Пример:\n"
-    "12 \\ 15.06.2026 \\ 19:00-23:00 \\ Светланский д2 \\ 45000"
+    "1 \\ 16.06.2026 \\ 20:00-23:00 \\ Отель Золотое кольцо \\ 120000\n\n"
+    "⚠️ Важно: пробел перед и после каждого  \\"
 )
 
 def _parse_free_input(text):
@@ -1468,20 +1469,53 @@ def _parse_free_input(text):
     t = text.strip()
 
     # Разбиваем по \ — ожидаем 5 частей
-    parts = [p.strip() for p in t.split('\\')]
+    # Нормализуем: убираем переносы строк, множественные пробелы
+    t = re.sub(r'[\n\r]+', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    parts = [p.strip() for p in t.split('\\') if p.strip()]
 
-    if len(parts) >= 5:
-        # Формат: номер, дата, время, адрес, стоимость
-        result['doc_num']    = parts[0]
-        result['date_event'] = parts[1].replace('/', '.')
-        result['time_event'] = parts[2]
-        # Адрес может содержать запятые — берём всё между временем и последней частью
-        result['address']    = ', '.join(parts[3:-1]).strip()
-        raw = parts[-1].replace(' ', '')
-        try:
-            result['price'] = f"{int(''.join(filter(str.isdigit, raw))):,}".replace(',', ' ')
-        except:
-            result['price'] = raw
+    if len(parts) >= 4:
+        # Умный парсер: определяем поля по содержимому, не по позиции
+        remaining = list(parts)
+
+        # Стоимость: часть только из цифр и пробелов
+        for i in range(len(remaining)-1, -1, -1):
+            if re.match(r'^[\d\s]+$', remaining[i]):
+                raw = remaining[i].replace(' ', '')
+                try:
+                    result['price'] = f"{int(raw):,}".replace(',', ' ')
+                    remaining.pop(i)
+                    break
+                except:
+                    pass
+
+        # Номер договора: часть из 1-4 цифр
+        for i, p in enumerate(remaining):
+            if re.match(r'^\d{1,4}$', p):
+                result['doc_num'] = p
+                remaining.pop(i)
+                break
+
+        # Дата: часть с дд.мм или дд.мм.гггг
+        for i, p in enumerate(remaining):
+            if re.search(r'\d{1,2}[./]\d{1,2}', p):
+                d = p.replace('/', '.').strip()
+                if re.match(r'^\d{1,2}\.\d{1,2}$', d):
+                    d += f".{__import__('datetime').date.today().year}"
+                result['date_event'] = d
+                remaining.pop(i)
+                break
+
+        # Время: часть с ЧЧ:ММ
+        for i, p in enumerate(remaining):
+            if re.search(r'\d{1,2}:\d{2}', p):
+                result['time_event'] = p.strip()
+                remaining.pop(i)
+                break
+
+        # Адрес: всё что осталось
+        if remaining:
+            result['address'] = ', '.join(remaining).strip()
     else:
         # Запятых мало — пробуем по паттернам как запасной вариант
         m = re.search(r'(\d{1,2}[./]\d{1,2}[./]\d{4})', t)
