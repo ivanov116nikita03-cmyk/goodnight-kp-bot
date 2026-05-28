@@ -1073,7 +1073,12 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = q.message.chat_id
     if q.data in ('confirm_no', 'cancel'):
         await delete_tracked(ctx, chat_id)
-        await q.message.reply_text("Отменено.")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+        track(ctx, msg.message_id)
         return ConversationHandler.END
     await q.edit_message_text("Готовлю КП...")
     try:
@@ -1455,7 +1460,12 @@ async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = q.message.chat_id
     if q.data in ('doc_confirm_no', 'cancel'):
         await delete_tracked(ctx, chat_id)
-        await q.message.reply_text("Отменено.")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+        track(ctx, msg.message_id)
         return ConversationHandler.END
     await q.edit_message_text("Готовлю документы...")
     try:
@@ -1476,6 +1486,20 @@ async def cancel_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменено. Напиши /start")
     return ConversationHandler.END
 
+
+async def global_doc_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if q.data in ("doc_confirm_no", "cancel"):
+        await delete_tracked(ctx, q.message.chat_id)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+        track(ctx, msg.message_id)
+    elif q.data == "doc_confirm_yes":
+        await q.answer("Начни заново через меню.", show_alert=True)
 
 async def post_init(app):
     await app.bot.set_my_commands([
@@ -1551,6 +1575,7 @@ def main():
     app.add_handler(kp_conv)
     app.add_handler(doc_conv)
     app.add_handler(CallbackQueryHandler(menu_cb, pattern=r'^menu_back$'))
+    app.add_handler(CallbackQueryHandler(global_doc_confirm_cb, pattern=r'^(doc_confirm_no|doc_confirm_yes|cancel)$'))
 
     print("Bot started...")
     app.run_polling()
