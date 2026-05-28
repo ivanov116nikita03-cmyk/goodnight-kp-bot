@@ -922,8 +922,9 @@ def build_docs(data):
                     fp = os.path.join(root, fn)
                     z.write(fp, os.path.relpath(fp, wdir2))
         sch_pdf = convert_to_pdf(sch_path, tmp_dir)
-        results.append((sch_pdf, f'Счёт_{doc_num}.pdf') if sch_pdf
-                       else (sch_path, f'Счёт_{doc_num}.docx'))
+        sch_final = sch_pdf if sch_pdf and os.path.exists(sch_pdf) else sch_path
+        if os.path.exists(sch_final):
+            results.append((sch_final, f'Счёт_{doc_num}.pdf' if sch_pdf else f'Счёт_{doc_num}.docx'))
     except Exception as e:
         raise Exception(f"Ошибка счёта: {e}")
     try:
@@ -973,10 +974,13 @@ def build_docs(data):
                     fp = os.path.join(root, fn)
                     z.write(fp, os.path.relpath(fp, wdir3))
         akt_pdf = convert_to_pdf(akt_docx, tmp_dir)
-        results.append((akt_pdf, f'Акт_{doc_num}.pdf') if akt_pdf
-                       else (akt_docx, f'Акт_{doc_num}.docx'))
+        akt_final = akt_pdf if akt_pdf and os.path.exists(akt_pdf) else akt_docx
+        if os.path.exists(akt_final):
+            results.append((akt_final, f'Акт_{doc_num}.pdf' if akt_pdf else f'Акт_{doc_num}.docx'))
     except Exception as e:
         raise Exception(f"Ошибка акта: {e}")
+    if not results:
+        raise Exception("Ни один документ не был создан. Проверьте шаблоны на сервере.")
     if doc_type == 'fiz':
         return [results[0]], tmp_dir
     return results, tmp_dir
@@ -1831,7 +1835,9 @@ async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         tb = traceback.format_exc()
         print(f"BUILD_DOCS ERROR: {tb}")
-        await q.message.reply_text(f"Ошибка: {e}\n\nПодробности в логах сервера.")
+        # Показываем последние 3 строки traceback прямо в боте для быстрой диагностики
+        tb_short = '\n'.join(tb.strip().split('\n')[-3:])
+        await q.message.reply_text(f"Ошибка: {e}\n\n{tb_short}")
     return ConversationHandler.END
 
 async def cancel_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
