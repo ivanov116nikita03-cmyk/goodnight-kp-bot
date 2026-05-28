@@ -604,6 +604,10 @@ def normalize_docx_xml(xml):
         if not me: break
         p_start, p_end = ms.start(), me.end()
         para = xml[p_start:p_end]
+        # Не объединяем runs если параграф содержит таб-стоп — он разделяет runs намеренно
+        if '<w:tab/>' in para:
+            search_from = p_end
+            continue
         ts = list(t_re.finditer(para))
         if len(ts) > 1:
             combined = ''.join(m.group(2) for m in ts)
@@ -634,7 +638,12 @@ def calc_duration(time_str):
     if len(times) >= 2:
         start = int(times[0][0]) * 60 + int(times[0][1])
         end   = int(times[1][0]) * 60 + int(times[1][1])
-        diff  = end - start
+        # Полночь (00:00) и переход через сутки
+        if end == 0:
+            end = 24 * 60
+        elif end < start:
+            end += 24 * 60
+        diff = end - start
         if diff > 0:
             h, m = diff // 60, diff % 60
             if m == 0:
@@ -1180,74 +1189,46 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Свободный ввод данных мероприятия ────────────────────────────────────────
 
 FREE_INPUT_PROMPT = (
-    "Напиши данные мероприятия одним сообщением:\n\n"
-    "(номер договора, дата, время начала и конца, адрес проведения, стоимость)\n\n"
+    "Напиши данные мероприятия одним сообщением.\n"
+    "Разделяй каждый пункт символом \\  (обратный слеш)\n\n"
+    "Порядок: номер \\ дата \\ время \\ адрес \\ стоимость\n\n"
     "Пример:\n"
-    "12, 15.06.2026, 19:00-21:00, Денисовский пер. 30 стр.1, 45000"
+    "12 \\ 15.06.2026 \\ 19:00-23:00 \\ Светланский д2 \\ 45000"
 )
 
 def _parse_free_input(text):
-    """Парсит свободный ввод данных мероприятия."""
+    """Парсит свободный ввод через запятую: номер, дата, время, адрес, стоимость."""
     result = {}
     t = text.strip()
 
-    # Номер договора: первое число в начале или рядом со словом «номер/договор/№»
-    m = re.search(r'(?:^|№|номер\s*(?:договора)?|договор\s*№?)\s*(\d+)', t, re.I)
-    if m:
-        result['doc_num'] = m.group(1)
-    else:
-        m = re.search(r'^\s*(\d{1,4})\s*[,;\s]', t)
-        if m and len(m.group(1)) <= 4:
-            result['doc_num'] = m.group(1)
+    # Разбиваем по \ — ожидаем 5 частей
+    parts = [p.strip() for p in t.split('\\')]
 
-    # Дата: дд.мм.гггг или дд/мм/гггг
-    m = re.search(r'(\d{1,2}[./]\d{1,2}[./]\d{4})', t)
-    if m:
-        result['date_event'] = m.group(1).replace('/', '.')
-
-    # Время: ЧЧ:ММ-ЧЧ:ММ или ЧЧ:ММ — ЧЧ:ММ
-    m = re.search(r'(\d{1,2}:\d{2})\s*[-—–]\s*(\d{1,2}:\d{2})', t)
-    if m:
-        result['time_event'] = f"{m.group(1)} — {m.group(2)}"
-    else:
-        m = re.search(r'(\d{1,2}:\d{2})', t)
-        if m:
-            result['time_event'] = m.group(1)
-
-    # Стоимость: число из 4-7 цифр рядом с «руб» или просто крупное число
-    m = re.search(r'(\d[\d\s]{3,8})\s*(?:руб|₽|р\.)', t, re.I)
-    if m:
-        raw = m.group(1).replace(' ', '')
+    if len(parts) >= 5:
+        # Формат: номер, дата, время, адрес, стоимость
+        result['doc_num']    = parts[0]
+        result['date_event'] = parts[1].replace('/', '.')
+        result['time_event'] = parts[2]
+        # Адрес может содержать запятые — берём всё между временем и последней частью
+        result['address']    = ', '.join(parts[3:-1]).strip()
+        raw = parts[-1].replace(' ', '')
         try:
-            result['price'] = f"{int(raw):,}".replace(',', ' ')
+            result['price'] = f"{int(''.join(filter(str.isdigit, raw))):,}".replace(',', ' ')
         except:
             result['price'] = raw
     else:
-        # Ищем число 4-7 цифр без метки — вероятно стоимость
-        nums = re.findall(r'(?<!\d)(\d{4,7})(?!\d)', t)
-        for n in nums:
-            # Исключаем год и индекс
-            if not (2020 <= int(n) <= 2030) and not (100000 <= int(n) <= 999999):
+        # Запятых мало — пробуем по паттернам как запасной вариант
+        m = re.search(r'(\d{1,2}[./]\d{1,2}[./]\d{4})', t)
+        if m: result['date_event'] = m.group(1).replace('/', '.')
+        m = re.search(r'(\d{1,2}:\d{2})\s*[-—–]\s*(\d{1,2}:\d{2})', t)
+        if m: result['time_event'] = f"{m.group(1)} — {m.group(2)}"
+        m = re.search(r'(?:^|№)\s*(\d{1,4})(?=[,\s])', t)
+        if m: result['doc_num'] = m.group(1)
+        m = re.search(r'(\d{4,6})\s*(?:руб|₽|р\.?)?', t, re.I)
+        if m:
+            n = m.group(1)
+            if not (2020 <= int(n) <= 2030):
                 result['price'] = f"{int(n):,}".replace(',', ' ')
-                break
-
-    # Адрес: ищем после времени и стоимости — всё что осталось
-    # Удаляем уже найденные части и берём оставшийся значимый текст
-    addr_text = t
-    for pat in [
-        r'\d{1,2}[./]\d{1,2}[./]\d{4}',          # дата
-        r'\d{1,2}:\d{2}\s*[-—–]\s*\d{1,2}:\d{2}', # время диапазон
-        r'\d{1,2}:\d{2}',                           # время одиночное
-        r'\d[\d\s]{3,8}\s*(?:руб|₽|р\.)',           # стоимость с меткой
-        r'(?:^|[,;\s])(\d{1,4})(?=[,;\s])',         # номер договора
-        r'[,;]\s*\d{4,7}(?:[,;\s]|$)',              # стоимость без метки
-    ]:
-        addr_text = re.sub(pat, ' ', addr_text, flags=re.I)
-    # Убираем лишние пробелы и знаки препинания
-    addr_text = re.sub(r'[,;\s]+', ' ', addr_text).strip(' ,;')
-    # Адрес — минимум 5 символов и содержит букву
-    if len(addr_text) >= 5 and re.search(r'[а-яёa-z]', addr_text, re.I):
-        result['address'] = addr_text
 
     return result
 
