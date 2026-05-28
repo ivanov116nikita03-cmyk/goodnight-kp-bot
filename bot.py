@@ -418,6 +418,8 @@ def kb_card_review(card):
     """
     rows = []
     for key, label in CARD_FIELDS:
+        if key not in card:
+            continue
         val = card.get(key, '')
         icon = '✅' if val else '❌'
         display = (val[:38] + '…') if val and len(val) > 38 else (val or 'не найдено')
@@ -1140,7 +1142,10 @@ async def doc_card_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def doc_card_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    ctx.user_data['card'] = parse_card(text)
+    card = parse_card(text)
+    if ctx.user_data.get('doc_type') == 'ip':
+        card.pop('kpp', None)
+    ctx.user_data['card'] = card
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     return await _show_card_review(update, ctx)
 
@@ -1151,7 +1156,10 @@ async def doc_card_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     with open(tmp, encoding='utf-8', errors='ignore') as f:
         text = f.read()
     os.remove(tmp)
-    ctx.user_data['card'] = parse_card(text)
+    card = parse_card(text)
+    if ctx.user_data.get('doc_type') == 'ip':
+        card.pop('kpp', None)
+    ctx.user_data['card'] = card
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     return await _show_card_review(update, ctx)
 
@@ -1162,10 +1170,12 @@ def _card_review_text(card):
     """Текст анкеты для отображения над кнопками."""
     lines = ["Проверь данные карточки:\n"]
     for key, label in CARD_FIELDS:
+        if key not in card:
+            continue
         val = card.get(key, '')
         icon = '✅' if val else '❌'
         lines.append(f"{icon} {label}: {val or 'не найдено'}")
-    lines.append("\nНажми ✏️ рядом с полем чтобы исправить, или подтверди.")
+    lines.append("\nНажми на поле чтобы исправить, или подтверди.")
     return '\n'.join(lines)
 
 async def _show_card_review(update_or_query, ctx, is_edit=False):
