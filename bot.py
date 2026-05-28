@@ -604,6 +604,10 @@ def normalize_docx_xml(xml):
         if not me: break
         p_start, p_end = ms.start(), me.end()
         para = xml[p_start:p_end]
+        # Не объединяем runs если параграф содержит таб-стоп — он разделяет runs намеренно
+        if '<w:tab/>' in para:
+            search_from = p_end
+            continue
         ts = list(t_re.finditer(para))
         if len(ts) > 1:
             combined = ''.join(m.group(2) for m in ts)
@@ -634,7 +638,12 @@ def calc_duration(time_str):
     if len(times) >= 2:
         start = int(times[0][0]) * 60 + int(times[0][1])
         end   = int(times[1][0]) * 60 + int(times[1][1])
-        diff  = end - start
+        # Полночь (00:00) и переход через сутки
+        if end == 0:
+            end = 24 * 60
+        elif end < start:
+            end += 24 * 60
+        diff = end - start
         if diff > 0:
             h, m = diff // 60, diff % 60
             if m == 0:
@@ -1181,10 +1190,10 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 FREE_INPUT_PROMPT = (
     "Напиши данные мероприятия одним сообщением.\n"
-    "Разделяй каждый пункт запятой — это важно!\n\n"
-    "Порядок: номер договора, дата, время, адрес, стоимость\n\n"
+    "Разделяй каждый пункт символом \\  (обратный слеш)\n\n"
+    "Порядок: номер \\ дата \\ время \\ адрес \\ стоимость\n\n"
     "Пример:\n"
-    "12, 15.06.2026, 19:00-21:00, Светланский пер. д.2, 45000"
+    "12 \\ 15.06.2026 \\ 19:00-23:00 \\ Светланский д2 \\ 45000"
 )
 
 def _parse_free_input(text):
@@ -1192,8 +1201,8 @@ def _parse_free_input(text):
     result = {}
     t = text.strip()
 
-    # Разбиваем по запятым — ожидаем 5 частей
-    parts = [p.strip() for p in t.split(',')]
+    # Разбиваем по \ — ожидаем 5 частей
+    parts = [p.strip() for p in t.split('\\')]
 
     if len(parts) >= 5:
         # Формат: номер, дата, время, адрес, стоимость
