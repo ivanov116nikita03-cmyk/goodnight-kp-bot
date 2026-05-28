@@ -137,14 +137,45 @@ def num_to_words(n):
     if n == 0:
         return 'ноль рублей 00 копеек'
     result = []
+    if n >= 1000000:
+        # Миллионы
+        mn = n // 1000000
+        result.extend(num_to_words(mn * 1000).replace(' тысяч рублей 00 копеек','').replace(' тысяча рублей 00 копеек','').replace(' тысячи рублей 00 копеек','').split())
+        # Пересчитываем без миллионов
+        result = []
+        mn = n // 1000000
+        if mn == 1:
+            result.append('один миллион')
+        elif mn in [2,3,4]:
+            result.append(ones[mn] + ' миллиона')
+        elif mn < 20:
+            result.append(ones[mn] + ' миллионов')
+        else:
+            result.append(tens[mn // 10])
+            if mn % 10:
+                result.append(ones[mn % 10] + ' миллионов')
+            else:
+                result.append('миллионов')
+        n = n % 1000000
     if n >= 1000:
         th = n // 1000
         if th < 20:
             result.append(thousands_f[th])
-        else:
+        elif th < 100:
             result.append(tens[th // 10])
             if th % 10:
                 result.append(thousands_f[th % 10])
+        else:
+            # Сотни тысяч (100_000 — 999_000)
+            result.append(hundreds[th // 100])
+            th_rem = th % 100
+            if th_rem < 20:
+                if th_rem > 0:
+                    result.append(thousands_f[th_rem])
+            else:
+                result.append(tens[th_rem // 10])
+                if th_rem % 10:
+                    result.append(thousands_f[th_rem % 10])
         if th % 100 in range(11, 20):
             result.append('тысяч')
         elif th % 10 == 1:
