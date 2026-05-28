@@ -377,6 +377,8 @@ def parse_card(text):
             val = m.group(1).strip().rstrip(',. ')
             # Убираем "Название банка" если вдруг попало в начало
             val = re.sub(r'^(?:Название\s+банка\s+)', '', val, flags=re.I).strip()
+            # Обрезаем если БИК попал в конец строки банка
+            val = re.split(r'\s+БИК\b', val, flags=re.I)[0].strip().rstrip(',. ')
             if len(val) >= 3 and not re.match(r'^\d+$', val) and not val[:2].isdigit():
                 data['bank'] = val[:100]
                 break
@@ -432,11 +434,17 @@ def parse_card(text):
             if addr_parts:
                 data['address'] = ', '.join(addr_parts).strip().rstrip(',. ')
                 addr_found = True
-    # Вариант 3: одна строка с индексом и городом
+    # Вариант 3: одна строка с индексом и городом — обрезаем по стоп-словам
     if not addr_found:
         m = re.search(r'(\d{6},?\s*(?:РОССИЯ|Россия|г\.|город|Г\.?\s|ул\.|пр-кт)[^\n]{10,200})', t, re.I)
         if m:
-            data['address'] = m.group(1).strip().rstrip(',. ')
+            val = m.group(1).strip()
+            # Обрезаем по стоп-словам которые не относятся к адресу
+            val = re.split(
+                r'\s+(?:ОГРН|ИНН|КПП|БИК|Банк|Счёт|Счет|р/с|к/с|Телефон|Email|Директор|Руководитель)\b',
+                val, flags=re.I
+            )[0].strip().rstrip(',. ')
+            data['address'] = val
 
     return data
 
@@ -796,6 +804,7 @@ def build_docs(data):
             ('[[ДЕНЬ]]',      today_day),
             ('[[МЕС_ГОД]]',   today_month_year),
             ('[[ДИР]]',       make_genitive_fio(director)),
+            ('[[ДИР_ИМ]]',    director),   # именительный падеж (для блока подписей)
             ('[[ДЛИТ]]',      duration),
             ('[[ДАТА_МЕР]]',  date_srок),
             ('[[МЕСТО]]',     address),
