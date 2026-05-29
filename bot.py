@@ -1,6 +1,7 @@
 # Файл bot.py — полная версия с экраном редактирования карточки
 
 import os
+import traceback
 from generate_kp import make_kp_pdf
 import re
 import zipfile
@@ -85,13 +86,17 @@ PROGRAM_BLOCKS = [
     ("arenda",  "Аренда студии"),
     ("disco",   "Дискотека с диджеем"),
     ("mafia",   "Мафия"),
+    ("vedenie", "Ведение"),
 ]
 DURATIONS = ["20 мин", "30 мин", "1 час", "1.5 часа", "2 часа"]
 BASE_DUR = {
-    "game":   {"default": "1.5 часа", "arenda": "1.5 часа"},
-    "packet": {"default": "1 час",    "arenda": "30 мин"},
-    "free":   {"default": "1 час",    "arenda": "1 час"},
+    "game":   {"default": "1.5 часа", "arenda": "1.5 часа", "vedenie": "1 час"},
+    "packet": {"default": "1 час",    "arenda": "30 мин",   "vedenie": "1 час"},
+    "free":   {"default": "1 час",    "arenda": "1 час",    "vedenie": "1 час"},
 }
+
+# Фиксированная стоимость блока "Ведение" для КП
+VEDENIE_PRICE_PER_HOUR = 14000
 
 
 # Утилиты
@@ -132,14 +137,45 @@ def num_to_words(n):
     if n == 0:
         return 'ноль рублей 00 копеек'
     result = []
+    if n >= 1000000:
+        # Миллионы
+        mn = n // 1000000
+        result.extend(num_to_words(mn * 1000).replace(' тысяч рублей 00 копеек','').replace(' тысяча рублей 00 копеек','').replace(' тысячи рублей 00 копеек','').split())
+        # Пересчитываем без миллионов
+        result = []
+        mn = n // 1000000
+        if mn == 1:
+            result.append('один миллион')
+        elif mn in [2,3,4]:
+            result.append(ones[mn] + ' миллиона')
+        elif mn < 20:
+            result.append(ones[mn] + ' миллионов')
+        else:
+            result.append(tens[mn // 10])
+            if mn % 10:
+                result.append(ones[mn % 10] + ' миллионов')
+            else:
+                result.append('миллионов')
+        n = n % 1000000
     if n >= 1000:
         th = n // 1000
         if th < 20:
             result.append(thousands_f[th])
-        else:
+        elif th < 100:
             result.append(tens[th // 10])
             if th % 10:
                 result.append(thousands_f[th % 10])
+        else:
+            # Сотни тысяч (100_000 — 999_000)
+            result.append(hundreds[th // 100])
+            th_rem = th % 100
+            if th_rem < 20:
+                if th_rem > 0:
+                    result.append(thousands_f[th_rem])
+            else:
+                result.append(tens[th_rem // 10])
+                if th_rem % 10:
+                    result.append(thousands_f[th_rem % 10])
         if th % 100 in range(11, 20):
             result.append('тысяч')
         elif th % 10 == 1:
@@ -454,6 +490,7 @@ def kb_main():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Создать КП",  callback_data="menu_kp")],
         [InlineKeyboardButton("📄 Документы",   callback_data="menu_docs")],
+        [InlineKeyboardButton("🧮 Калькулятор", callback_data="menu_calc")],
     ])
 
 def kb_docs():
@@ -479,25 +516,43 @@ def kb_format():
     ])
 
 def kb_program(sel, fmt, dur_mode=None):
+    """
+    sel = OrderedDict: {bid: dur} в порядке выбора пользователя.
+    Выбранные блоки показываются в порядке выбора со стрелками ↑↓.
+    Невыбранные — внизу списка.
+    """
     rows = []
-    n = 1
-    for bid, bname in PROGRAM_BLOCKS:
-        is_on = bid in sel
+    # Сначала выбранные — в порядке выбора
+    sel_list = list(sel.keys())
+    for n, bid in enumerate(sel_list, 1):
+        bname = next(bn for b, bn in PROGRAM_BLOCKS if b == bid)
         is_fixed = bid in FIXED_DUR
-        icon = "✅" if is_on else "☐"
-        num = str(n) if is_on else " "
-        dur = sel.get(bid, get_base_dur(bid, fmt)) if is_on else ""
-        label = f"{icon} {num}. {bname}" + (f" — {dur}" if dur else "")
-        if is_on: n += 1
-        if not is_fixed and is_on and dur_mode == bid:
+        dur = sel[bid]
+        label = f"✅ {n}. {bname} — {dur}"
+        if not is_fixed and dur_mode == bid:
             rows.append([InlineKeyboardButton(
-                ("▶ " if d == sel.get(bid) else "") + d,
+                ("▶ " if d == dur else "") + d,
                 callback_data=f"dur_{bid}_{d}"
             ) for d in DURATIONS])
         row = [InlineKeyboardButton(label, callback_data=f"tog_{bid}")]
-        if not is_fixed and is_on and dur_mode != bid:
+        if not is_fixed and dur_mode != bid:
             row.append(InlineKeyboardButton("⏱", callback_data=f"editdur_{bid}"))
+        # Стрелки перемещения (только если нет dur_mode)
+        if not is_fixed and dur_mode != bid and len(sel_list) > 1:
+            up   = InlineKeyboardButton("↑", callback_data=f"up_{bid}")
+            down = InlineKeyboardButton("↓", callback_data=f"dn_{bid}")
+            if n == 1:
+                row.append(down)
+            elif n == len(sel_list):
+                row.append(up)
+            else:
+                row.append(up)
+                row.append(down)
         rows.append(row)
+    # Потом невыбранные
+    for bid, bname in PROGRAM_BLOCKS:
+        if bid not in sel:
+            rows.append([InlineKeyboardButton(f"☐  {bname}", callback_data=f"tog_{bid}")])
     rows.append([
         InlineKeyboardButton("✔ Готово",  callback_data="prog_done"),
         InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
@@ -898,8 +953,9 @@ def build_docs(data):
                     fp = os.path.join(root, fn)
                     z.write(fp, os.path.relpath(fp, wdir2))
         sch_pdf = convert_to_pdf(sch_path, tmp_dir)
-        results.append((sch_pdf, f'Счёт_{doc_num}.pdf') if sch_pdf
-                       else (sch_path, f'Счёт_{doc_num}.docx'))
+        sch_final = sch_pdf if sch_pdf and os.path.exists(sch_pdf) else sch_path
+        if os.path.exists(sch_final):
+            results.append((sch_final, f'Счёт_{doc_num}.pdf' if sch_pdf else f'Счёт_{doc_num}.docx'))
     except Exception as e:
         raise Exception(f"Ошибка счёта: {e}")
     try:
@@ -949,10 +1005,13 @@ def build_docs(data):
                     fp = os.path.join(root, fn)
                     z.write(fp, os.path.relpath(fp, wdir3))
         akt_pdf = convert_to_pdf(akt_docx, tmp_dir)
-        results.append((akt_pdf, f'Акт_{doc_num}.pdf') if akt_pdf
-                       else (akt_docx, f'Акт_{doc_num}.docx'))
+        akt_final = akt_pdf if akt_pdf and os.path.exists(akt_pdf) else akt_docx
+        if os.path.exists(akt_final):
+            results.append((akt_final, f'Акт_{doc_num}.pdf' if akt_pdf else f'Акт_{doc_num}.docx'))
     except Exception as e:
         raise Exception(f"Ошибка акта: {e}")
+    if not results:
+        raise Exception("Ни один документ не был создан. Проверьте шаблоны на сервере.")
     if doc_type == 'fiz':
         return [results[0]], tmp_dir
     return results, tmp_dir
@@ -1006,6 +1065,184 @@ def _initials(fio):
 
 # ── КП Handlers ─────────────────────────────────────────────────────────────
 
+
+# ── Прайс для калькулятора ────────────────────────────────────────────────────
+PRICE_STUDIO = {
+    ("велком", 1):   1800,
+    ("велком", 1.5): 2200,
+    ("велком", 2):   2800,
+    ("велком", 3):   3200,
+    ("лаунж",  1):   1800,
+    ("лаунж",  1.5): 2200,
+    ("лаунж",  2):   2800,
+    ("лаунж",  3):   3200,
+}
+STUDIO_MIN = {
+    ("велком", 1):   18000,
+    ("велком", 1.5): 22000,
+    ("лаунж",  1):   14400,
+    ("лаунж",  1.5): 17600,
+}
+PRICE_VYEZD = {
+    (1,   10): 28000, (1,   15): 33000, (1,   20): 39000,
+    (1,   25): 44000, (1,   30): 49000, (1,   35): 54000, (1,   40): 59000,
+    (1.5, 10): 32000, (1.5, 15): 37000, (1.5, 20): 43000,
+    (1.5, 25): 48000, (1.5, 30): 53000, (1.5, 35): 58000, (1.5, 40): 63000,
+    (2,   10): 37000, (2,   15): 42000, (2,   20): 48000,
+    (2,   25): 54000, (2,   30): 58000, (2,   35): 63000, (2,   40): 68000,
+}
+
+def calc_vyezd(people: int, hours: float) -> int:
+    brackets = [10, 15, 20, 25, 30, 35, 40]
+    for b in brackets:
+        if people <= b:
+            return PRICE_VYEZD.get((hours, b), 0)
+    return 0
+
+def calc_studio(fmt: str, hours: float, people: int) -> dict:
+    price_per = PRICE_STUDIO.get((fmt, hours), 0)
+    total = price_per * people
+    minimum = STUDIO_MIN.get((fmt, hours), 0)
+    actual = max(total, minimum)
+    return {"per_person": price_per, "raw": total, "minimum": minimum, "actual": actual}
+
+CALC_FORMAT, CALC_HOURS, CALC_PEOPLE, CALC_RS = range(40, 44)
+
+def kb_calc_format():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚗 Выезд",         callback_data="calc_vyezd")],
+        [InlineKeyboardButton("🏢 Студия велком", callback_data="calc_velkom")],
+        [InlineKeyboardButton("🏠 Студия лаунж",  callback_data="calc_lanzh")],
+        [InlineKeyboardButton("❌ Отмена",         callback_data="cancel")],
+    ])
+
+def kb_calc_hours_vyezd():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("1 час",    callback_data="ch_1"),
+         InlineKeyboardButton("1.5 часа", callback_data="ch_1.5"),
+         InlineKeyboardButton("2 часа",   callback_data="ch_2")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+    ])
+
+def kb_calc_hours_studio():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("1 час",    callback_data="ch_1"),
+         InlineKeyboardButton("1.5 часа", callback_data="ch_1.5")],
+        [InlineKeyboardButton("2 часа",   callback_data="ch_2"),
+         InlineKeyboardButton("3 часа",   callback_data="ch_3")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+    ])
+
+def kb_calc_rs():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Нет, обычная оплата",              callback_data="rs_no")],
+        [InlineKeyboardButton("🏦 Да, по расчётному счёту (+10%)", callback_data="rs_yes")],
+    ])
+
+async def calc_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await safe_delete(ctx.bot, query.message.chat_id, query.message.message_id)
+    msg = await ctx.bot.send_message(
+        query.message.chat_id,
+        "Выберите формат мероприятия:",
+        reply_markup=kb_calc_format()
+    )
+    track(ctx, msg.message_id)
+    return CALC_FORMAT
+
+async def calc_got_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    fmt_map = {"calc_vyezd": "выезд", "calc_velkom": "велком", "calc_lanzh": "лаунж"}
+    fmt = fmt_map.get(query.data, "выезд")
+    ctx.user_data["calc_fmt"] = fmt
+    kb = kb_calc_hours_vyezd() if fmt == "выезд" else kb_calc_hours_studio()
+    await query.edit_message_text("Выберите длительность:", reply_markup=kb)
+    return CALC_HOURS
+
+async def calc_got_hours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    hours = float(query.data.replace("ch_", ""))
+    ctx.user_data["calc_hours"] = hours
+    await query.edit_message_text("Введите количество человек:")
+    return CALC_PEOPLE
+
+async def calc_got_people(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        people = int(update.message.text.strip())
+        if people < 1:
+            raise ValueError
+    except ValueError:
+        msg = await update.message.reply_text("Введите число больше 0:")
+        track(ctx, msg.message_id, update.message.message_id)
+        return CALC_PEOPLE
+    ctx.user_data["calc_people"] = people
+    track(ctx, update.message.message_id)
+    msg = await update.message.reply_text(
+        "Оплата по расчётному счёту?",
+        reply_markup=kb_calc_rs()
+    )
+    track(ctx, msg.message_id)
+    return CALC_RS
+
+async def calc_got_rs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    fmt    = ctx.user_data.get("calc_fmt", "выезд")
+    hours  = ctx.user_data.get("calc_hours", 1)
+    people = ctx.user_data.get("calc_people", 10)
+    rs     = query.data == "rs_yes"
+    if fmt == "выезд":
+        base = calc_vyezd(people, hours)
+        if base == 0:
+            await query.edit_message_text(
+                "Более 40 человек рассчитывается индивидуально.\nСвяжитесь с менеджером.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ В меню", callback_data="menu_back")]])
+            )
+            return ConversationHandler.END
+        total = int(base * 1.1) if rs else base
+        rs_note = " (+10% РС)" if rs else ""
+        text = (
+            f"🧮 Расчёт стоимости\n\n"
+            f"Формат: Выезд\n"
+            f"Длительность: {hours} ч\n"
+            f"Гостей: {people} чел\n"
+            f"{'Оплата по РС' if rs else 'Обычная оплата'}\n\n"
+            f"Стоимость{rs_note}: {total:,} ₽".replace(",", " ")
+        )
+    else:
+        r = calc_studio(fmt, hours, people)
+        if r["per_person"] == 0:
+            await query.edit_message_text(
+                f"Для формата {fmt} {hours} ч нет тарифа.\nПроверьте данные.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ В меню", callback_data="menu_back")]])
+            )
+            return ConversationHandler.END
+        base = r["actual"]
+        total = int(base * 1.1) if rs else base
+        rs_note = " (+10% РС)" if rs else ""
+        min_note = f"\n⚠️ Применена минималка: {r['minimum']:,} ₽".replace(",", " ") if r["raw"] < r["minimum"] else ""
+        text = (
+            f"🧮 Расчёт стоимости\n\n"
+            f"Формат: Студия {fmt}\n"
+            f"Длительность: {hours} ч\n"
+            f"Гостей: {people} чел\n"
+            f"Цена/чел: {r['per_person']:,} ₽\n".replace(",", " ") +
+            f"{'Оплата по РС' if rs else 'Обычная оплата'}"
+            f"{min_note}\n\n"
+            f"Итого{rs_note}: {total:,} ₽".replace(",", " ")
+        )
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Новый расчёт", callback_data="menu_calc")],
+            [InlineKeyboardButton("◀ В меню",        callback_data="menu_back")],
+        ])
+    )
+    return ConversationHandler.END
+
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
     msg = await update.message.reply_text("Главное меню:", reply_markup=kb_main())
@@ -1055,7 +1292,12 @@ async def kp_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     loc = q.data.replace('loc_', '')
     ctx.user_data['location'] = loc
     if loc == 'vyezd':
-        await q.edit_message_text("Адрес выезда:")
+        await q.edit_message_text(
+            "Адрес выезда:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Отмена", callback_data="cancel")
+            ]])
+        )
         return KP_ADDR
     await q.edit_message_text("Дата мероприятия? (например: 15.06.2026)")
     return KP_DATE
@@ -1111,9 +1353,29 @@ async def kp_program(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     if data.startswith('tog_'):
         bid = data[4:]
-        if bid in sel: del sel[bid]
-        else: sel[bid] = get_base_dur(bid, fmt)
+        if bid in sel:
+            del sel[bid]
+        else:
+            sel[bid] = get_base_dur(bid, fmt)
         if bid not in FIXED_DUR: ctx.user_data['dur_mode'] = None
+    elif data.startswith('up_'):
+        bid = data[3:]
+        keys = list(sel.keys())
+        i = keys.index(bid)
+        if i > 0:
+            keys[i], keys[i-1] = keys[i-1], keys[i]
+            sel = {k: sel[k] for k in keys}
+            ctx.user_data['selected'] = sel
+        ctx.user_data['dur_mode'] = None
+    elif data.startswith('dn_'):
+        bid = data[3:]
+        keys = list(sel.keys())
+        i = keys.index(bid)
+        if i < len(keys) - 1:
+            keys[i], keys[i+1] = keys[i+1], keys[i]
+            sel = {k: sel[k] for k in keys}
+            ctx.user_data['selected'] = sel
+        ctx.user_data['dur_mode'] = None
     elif data.startswith('editdur_'):
         ctx.user_data['dur_mode'] = data[8:]
     elif data.startswith('dur_'):
@@ -1141,7 +1403,9 @@ async def kp_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     n = 1; lines = []
     for bid, bname in PROGRAM_BLOCKS:
         if bid in sel:
-            lines.append(f"{n}) {bname} — {sel[bid]}"); n += 1
+            dur = sel[bid]
+            lines.append(f"{n}) {bname} — {dur}")
+            n += 1
     ctx.user_data['program_lines'] = '\n'.join(lines)
     loc = {'big': 'Большая студия', 'small': 'Малая студия', 'vyezd': 'Выезд'}[ctx.user_data['location']]
     is_vyezd = ctx.user_data['location'] == 'vyezd'
@@ -1182,6 +1446,8 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await delete_tracked(ctx, chat_id)
         await safe_delete(ctx.bot, chat_id, q.message.message_id)
     except Exception as e:
+        tb = traceback.format_exc()
+        print(f"BUILD_KP ERROR: {tb}")
         await q.message.reply_text(f"Ошибка: {e}")
     return ConversationHandler.END
 
@@ -1190,10 +1456,11 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 FREE_INPUT_PROMPT = (
     "Напиши данные мероприятия одним сообщением.\n"
-    "Разделяй каждый пункт символом \\  (обратный слеш)\n\n"
+    "Разделяй пункты символом  \\  (обратный слеш) — обязательно с пробелами по бокам!\n\n"
     "Порядок: номер \\ дата \\ время \\ адрес \\ стоимость\n\n"
     "Пример:\n"
-    "12 \\ 15.06.2026 \\ 19:00-23:00 \\ Светланский д2 \\ 45000"
+    "1 \\ 16.06.2026 \\ 20:00-23:00 \\ Отель Золотое кольцо \\ 120000\n\n"
+    "⚠️ Важно: пробел перед и после каждого  \\"
 )
 
 def _parse_free_input(text):
@@ -1202,20 +1469,53 @@ def _parse_free_input(text):
     t = text.strip()
 
     # Разбиваем по \ — ожидаем 5 частей
-    parts = [p.strip() for p in t.split('\\')]
+    # Нормализуем: убираем переносы строк, множественные пробелы
+    t = re.sub(r'[\n\r]+', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    parts = [p.strip() for p in t.split('\\') if p.strip()]
 
-    if len(parts) >= 5:
-        # Формат: номер, дата, время, адрес, стоимость
-        result['doc_num']    = parts[0]
-        result['date_event'] = parts[1].replace('/', '.')
-        result['time_event'] = parts[2]
-        # Адрес может содержать запятые — берём всё между временем и последней частью
-        result['address']    = ', '.join(parts[3:-1]).strip()
-        raw = parts[-1].replace(' ', '')
-        try:
-            result['price'] = f"{int(''.join(filter(str.isdigit, raw))):,}".replace(',', ' ')
-        except:
-            result['price'] = raw
+    if len(parts) >= 4:
+        # Умный парсер: определяем поля по содержимому, не по позиции
+        remaining = list(parts)
+
+        # Стоимость: часть только из цифр и пробелов
+        for i in range(len(remaining)-1, -1, -1):
+            if re.match(r'^[\d\s]+$', remaining[i]):
+                raw = remaining[i].replace(' ', '')
+                try:
+                    result['price'] = f"{int(raw):,}".replace(',', ' ')
+                    remaining.pop(i)
+                    break
+                except:
+                    pass
+
+        # Номер договора: часть из 1-4 цифр
+        for i, p in enumerate(remaining):
+            if re.match(r'^\d{1,4}$', p):
+                result['doc_num'] = p
+                remaining.pop(i)
+                break
+
+        # Дата: часть с дд.мм или дд.мм.гггг
+        for i, p in enumerate(remaining):
+            if re.search(r'\d{1,2}[./]\d{1,2}', p):
+                d = p.replace('/', '.').strip()
+                if re.match(r'^\d{1,2}\.\d{1,2}$', d):
+                    d += f".{__import__('datetime').date.today().year}"
+                result['date_event'] = d
+                remaining.pop(i)
+                break
+
+        # Время: часть с ЧЧ:ММ
+        for i, p in enumerate(remaining):
+            if re.search(r'\d{1,2}:\d{2}', p):
+                result['time_event'] = p.strip()
+                remaining.pop(i)
+                break
+
+        # Адрес: всё что осталось
+        if remaining:
+            result['address'] = ', '.join(remaining).strip()
     else:
         # Запятых мало — пробуем по паттернам как запасной вариант
         m = re.search(r'(\d{1,2}[./]\d{1,2}[./]\d{4})', t)
@@ -1598,7 +1898,11 @@ async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await delete_tracked(ctx, chat_id)
         await safe_delete(ctx.bot, chat_id, q.message.message_id)
     except Exception as e:
-        await q.message.reply_text(f"Ошибка: {e}")
+        tb = traceback.format_exc()
+        print(f"BUILD_DOCS ERROR: {tb}")
+        # Показываем последние 3 строки traceback прямо в боте для быстрой диагностики
+        tb_short = '\n'.join(tb.strip().split('\n')[-3:])
+        await q.message.reply_text(f"Ошибка: {e}\n\n{tb_short}")
     return ConversationHandler.END
 
 async def cancel_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1632,7 +1936,32 @@ async def post_init(app):
 
 
 def main():
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        read_timeout=60,
+        write_timeout=60,
+        connect_timeout=30,
+        pool_timeout=30,
+    )
+    app = Application.builder().token(TOKEN).request(request).post_init(post_init).build()
+
+    calc_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(calc_start, pattern=r'^menu_calc$'),
+        ],
+        states={
+            CALC_FORMAT:  [CallbackQueryHandler(calc_got_format, pattern=r'^calc_')],
+            CALC_HOURS:   [CallbackQueryHandler(calc_got_hours,  pattern=r'^ch_')],
+            CALC_PEOPLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, calc_got_people)],
+            CALC_RS:      [CallbackQueryHandler(calc_got_rs,     pattern=r'^rs_')],
+        },
+        fallbacks=[
+            CallbackQueryHandler(menu_cb, pattern=r'^(cancel|menu_back|menu_calc)$'),
+            CommandHandler("start", cmd_start),
+        ],
+        per_message=False,
+    )
 
     kp_conv = ConversationHandler(
         entry_points=[
@@ -1695,6 +2024,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(calc_conv)
     app.add_handler(kp_conv)
     app.add_handler(doc_conv)
     app.add_handler(CallbackQueryHandler(menu_cb, pattern=r'^menu_back$'))
