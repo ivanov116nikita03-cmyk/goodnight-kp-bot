@@ -1153,6 +1153,7 @@ def _logistics(km):
     return 5000 + _math.ceil((km - 20) / 10) * 3000
 
 def _h_fmt(h):
+    h = round(h, 1)
     if h == int(h): return str(int(h))
     return str(h).replace('.', ',')
 
@@ -1562,7 +1563,12 @@ async def calc_got_rs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         today_disc   = ctx.user_data.get("calc_today_disc", False)
         discount     = ctx.user_data.get('calc_discount')
         offer, _     = _studio_offer(hall, sel, people, has_birthday, discount, rs)
-    await query.edit_message_text(offer, reply_markup=menu_kb)
+    try:
+        await query.edit_message_text(offer, reply_markup=menu_kb)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"CALC_OFFER ERROR: {tb}")
+        await query.message.reply_text(f"Ошибка при генерации оффера: {e}")
     return ConversationHandler.END
 
 
