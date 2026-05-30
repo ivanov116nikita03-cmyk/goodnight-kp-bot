@@ -2082,21 +2082,21 @@ async def _after_card_confirmed(message, ctx):
 async def doc_fiz_fio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['fiz_fio'] = update.message.text.strip()
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("Серия и номер паспорта (например: 4520 123456):")
+    msg = await update.message.reply_text("Серия и номер паспорта (например: 4520 123456):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]))
     track(ctx, msg.message_id)
     return DOC_FIZ_PASS
 
 async def doc_fiz_pass(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['fiz_passport'] = update.message.text.strip()
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("Кем и когда выдан (например: ОВД Москва 01.01.2020):")
+    msg = await update.message.reply_text("Кем и когда выдан (например: ОВД Москва 01.01.2020):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]))
     track(ctx, msg.message_id)
     return DOC_FIZ_ISSUED
 
 async def doc_fiz_issued(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['fiz_issued'] = update.message.text.strip()
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("Код подразделения (например: 770-001):")
+    msg = await update.message.reply_text("Код подразделения (например: 770-001):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]))
     track(ctx, msg.message_id)
     return DOC_FIZ_CODE
 
@@ -2212,7 +2212,7 @@ async def global_doc_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app):
     global LO_SEM
-    LO_SEM = asyncio.Semaphore(3)  # создаём внутри event loop
+    LO_SEM = asyncio.Semaphore(2)  # 2 CPU + 2GB RAM — 2 параллельные генерации
     await app.bot.set_my_commands([
         BotCommand("start",  "Главное меню"),
         BotCommand("cancel", "Отменить"),
@@ -2313,7 +2313,10 @@ def main():
             DOC_FIZ_CODE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_fiz_code)],
             DOC_CONFIRM:     [CallbackQueryHandler(doc_confirm, pattern=r'^(doc_confirm_|cancel)')],
         },
-        fallbacks=[CommandHandler("cancel", cancel_handler)],
+        fallbacks=[
+            CallbackQueryHandler(menu_cb, pattern=r'^(cancel|menu_back)$'),
+            CommandHandler("cancel", cancel_handler),
+        ],
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
