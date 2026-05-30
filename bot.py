@@ -58,8 +58,10 @@ DOC_FORM       = 26   # алиас для совместимости
 DOC_FORM_EDIT  = 27   # не используется
 
 # НОВЫЕ состояния для анкеты карточки
-DOC_CARD_REVIEW = 30   # показываем анкету с кнопками
-DOC_CARD_EDIT   = 31   # пользователь вводит новое значение поля
+DOC_CARD_REVIEW      = 30   # анкета карточки
+DOC_CARD_EDIT        = 31   # редактирование поля карточки
+DOC_SERVICE_DESC     = 32   # описание услуги
+DOC_SERVICE_DESC_EDIT = 33  # редактирование описания
 
 # Метки полей карточки (ключ: человекочитаемое название)
 CARD_FIELDS = [
@@ -495,7 +497,8 @@ def kb_main():
 
 def kb_docs():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Договор + Счёт + Акт", callback_data="menu_all_docs")],
+        [InlineKeyboardButton("📄 Счёт + Акт",            callback_data="menu_schet_akt")],
+        [InlineKeyboardButton("📝 Счёт + Акт + Договор",  callback_data="menu_all_docs")],
         [InlineKeyboardButton("◀ Назад",                  callback_data="menu_back")],
     ])
 
@@ -839,6 +842,8 @@ def build_docs(data):
                                       f'КПП {kpp}' if kpp else '',
                                       address_zak] if p]
     zak_polnaya = ', '.join(zak_polnaya_parts) if zak_polnaya_parts else '—'
+    doc_set      = data.get('doc_set', 'full')
+    service_desc = data.get('service_desc', _default_service_desc(data))
     tmp_dir = tempfile.mkdtemp()
     results = []
     tmpl_dog = {
@@ -891,6 +896,7 @@ def build_docs(data):
             ('[[РС]]',        rs_zak),
             ('[[КС]]',        ks_zak),
             ('[[ДИР_ИНИ]]',   _initials(director)),
+            ('[[УСЛУГА]]',    service_desc),
         ]
         for old, new in dog_pairs:
             if old:
@@ -1545,9 +1551,17 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Раздел документов:", reply_markup=kb_docs())
         track(ctx, query.message.message_id)
         return DOC_MENU
+    elif query.data == "menu_schet_akt":
+        saved_mid = query.message.message_id
+        ctx.user_data.clear()
+        ctx.user_data['doc_set'] = 'schet_akt'
+        await query.edit_message_text("Тип заказчика:", reply_markup=kb_doc_type())
+        track(ctx, saved_mid)
+        return DOC_TYPE
     elif query.data == "menu_all_docs":
         saved_mid = query.message.message_id
         ctx.user_data.clear()
+        ctx.user_data['doc_set'] = 'full'
         await query.edit_message_text("Тип заказчика:", reply_markup=kb_doc_type())
         track(ctx, saved_mid)
         return DOC_TYPE
@@ -2005,6 +2019,49 @@ def _card_review_text(card):
     lines.append("\nНажми на поле чтобы исправить, или подтверди.")
     return '\n'.join(lines)
 
+def _default_service_desc(data):
+    date_str = data.get('date_event', '')
+    return (
+        f"Организация и проведение мероприятия в формате командообразующей игры "
+        f"по мотивам телепередач «Good Night» {_date_word(date_str)} года"
+    )
+
+async def doc_service_desc_show(message_obj, ctx):
+    """Показываем описание услуги с кнопками подтвердить/изменить."""
+    desc = ctx.user_data.get('service_desc') or _default_service_desc(ctx.user_data)
+    ctx.user_data['service_desc'] = desc
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить", callback_data="sdesc_ok")],
+        [InlineKeyboardButton("✏️ Изменить",    callback_data="sdesc_edit")],
+    ])
+    msg = await message_obj.reply_text(
+        f"Описание услуги в счёте и акте:\n\n{desc}\n\n"
+        "Нажми ✅ чтобы оставить или ✏️ чтобы изменить:",
+        reply_markup=kb
+    )
+    track(ctx, msg.message_id)
+    return DOC_SERVICE_DESC
+
+async def doc_service_desc_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    if q.data == "sdesc_ok":
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return await _show_doc_summary(q.message, ctx, via_message=False)
+    elif q.data == "sdesc_edit":
+        current = ctx.user_data.get('service_desc', '')
+        await q.edit_message_text(
+            f"Введи новое описание услуги:\n\nТекущее:\n{current}"
+        )
+        return DOC_SERVICE_DESC_EDIT
+
+async def doc_service_desc_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['service_desc'] = update.message.text.strip()
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    return await doc_service_desc_show(update.message, ctx)
+
 async def _show_card_review(update_or_query, ctx, is_edit=False):
     """
     Показывает анкету карточки.
@@ -2074,18 +2131,24 @@ async def doc_card_edit_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return DOC_CARD_REVIEW
 
 async def _after_card_confirmed(message, ctx):
-    """После подтверждения карточки: проверяем директора."""
+    """После подтверждения карточки: директор нужен только для договора."""
     card = ctx.user_data.get('card', {})
     doc_type = ctx.user_data.get('doc_type', 'ooo')
-    if doc_type == 'ip':
-        ctx.user_data['director'] = card.get('name', '')
-        return await _show_doc_summary(message, ctx, via_message=False)
-    if card.get('director'):
-        ctx.user_data['director'] = card['director']
-        return await _show_doc_summary(message, ctx, via_message=False)
-    msg = await message.reply_text("ФИО генерального директора заказчика (полностью):")
-    track(ctx, msg.message_id)
-    return DOC_DIRECTOR
+    doc_set  = ctx.user_data.get('doc_set', 'full')
+
+    if doc_set == 'full':
+        # Директор нужен для подписи в договоре
+        if doc_type == 'ip':
+            ctx.user_data['director'] = card.get('name', '')
+        elif card.get('director'):
+            ctx.user_data['director'] = card['director']
+        else:
+            msg = await message.reply_text("ФИО генерального директора заказчика (полностью):")
+            track(ctx, msg.message_id)
+            return DOC_DIRECTOR
+
+    # Показываем описание услуги (для обоих вариантов)
+    return await doc_service_desc_show(message, ctx)
 
 
 # ── Остальные хендлеры документов ───────────────────────────────────────────
@@ -2139,17 +2202,21 @@ async def _show_doc_summary(message_or_update, ctx, via_message=True):
     """Итоговая сводка перед созданием документов."""
     card = ctx.user_data.get('card', {})
     dur = ctx.user_data.get('duration', '—')
+    doc_set = ctx.user_data.get('doc_set', 'full')
+    service_desc = ctx.user_data.get('service_desc', _default_service_desc(ctx.user_data))
+    director_line = f"Директор: {ctx.user_data.get('director', '?')}\n" if doc_set == 'full' else ""
     summary = (
         f"Проверь данные документов:\n\n"
+        f"Тип: {'Счёт + Акт + Договор' if doc_set == 'full' else 'Счёт + Акт'}\n"
         f"Договор №{ctx.user_data['doc_num']}\n"
         f"Дата мероприятия: {ctx.user_data['date_event']}\n"
         f"Время: {ctx.user_data['time_event']}\n"
-        f"Длительность: {dur}\n"
         f"Адрес: {ctx.user_data['address']}\n"
         f"Стоимость: {ctx.user_data['price']} руб\n"
         f"Заказчик: {card.get('name', '?')}\n"
-        f"ИНН: {card.get('inn', '?')}\n"
-        f"Директор: {ctx.user_data.get('director', '?')}"
+        f"ИНН: {card.get('inn', '?')}\n" +
+        director_line +
+        f"Описание услуги: {service_desc[:60]}..."
     )
     if via_message:
         msg = await message_or_update.message.reply_text(summary, reply_markup=kb_doc_confirm())
@@ -2162,7 +2229,7 @@ async def _show_doc_summary(message_or_update, ctx, via_message=True):
 async def doc_director(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['director'] = update.message.text.strip()
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    return await _show_doc_summary(update, ctx, via_message=True)
+    return await doc_service_desc_show(update.message, ctx)
 
 async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -2283,12 +2350,12 @@ def main():
     doc_conv = ConversationHandler(
         entry_points=[
             CommandHandler("docs", cmd_docs),
-            CallbackQueryHandler(menu_cb, pattern=r'^menu_docs$'),
+            CallbackQueryHandler(menu_cb, pattern=r'^(menu_docs|menu_schet_akt|menu_all_docs)$'),
         ],
         allow_reentry=True,
         states={
             DOC_MENU: [
-                CallbackQueryHandler(menu_cb, pattern=r'^(menu_docs|menu_all_docs|menu_back|cancel)$'),
+                CallbackQueryHandler(menu_cb, pattern=r'^(menu_docs|menu_schet_akt|menu_all_docs|menu_back|cancel)$'),
             ],
             DOC_NUM:         [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_num)],
             DOC_DATE_EVENT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_date)],
@@ -2311,6 +2378,12 @@ def main():
             ],
             DOC_CARD_EDIT:   [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, doc_card_edit_text),
+            ],
+            DOC_SERVICE_DESC: [
+                CallbackQueryHandler(doc_service_desc_cb, pattern=r'^sdesc_'),
+            ],
+            DOC_SERVICE_DESC_EDIT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, doc_service_desc_text),
             ],
             DOC_DIRECTOR:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_director)],
             DOC_FIZ_FIO:     [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_fiz_fio)],
