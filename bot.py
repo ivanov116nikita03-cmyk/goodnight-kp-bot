@@ -1069,7 +1069,13 @@ def _initials(fio):
 # ── Прайс для калькулятора ────────────────────────────────────────────────────
 import math as _math
 
-# Студия
+BLOCK_NAMES = {
+    'velkom': 'Велком', 'break_': 'Перерыв', 'gn': 'Good Night',
+    'kk': 'Karaoke Star', 'bad': 'Bad Night 21+', 'ktokogo': 'Кто Кого',
+    'arenda': 'Аренда студии', 'disco': 'Дискотека с диджеем',
+    'mafia': 'Мафия', 'vedenie': 'Ведение',
+}
+
 STUDIO_RATES = {
     ('велком', 1.0): 1800, ('велком', 1.5): 2200,
     ('велком', 2.0): 2800, ('велком', 3.0): 3200,
@@ -1082,7 +1088,6 @@ STUDIO_MIN_TOTALS = {
 }
 STUDIO_MIN_PPL = {'велком': 10, 'лаунж': 8}
 
-# Выезд
 VYEZD_BASE = {
     (1.0, 10): 28000, (1.0, 15): 33000, (1.0, 20): 39000,
     (1.0, 25): 44000, (1.0, 30): 49000, (1.0, 35): 54000, (1.0, 40): 59000,
@@ -1093,13 +1098,13 @@ VYEZD_BASE = {
 }
 VEDENIE_PER_HOUR = 14000
 DISCO_PER_HOUR   = 9000
-
 GAME_BLOCKS_SET  = {'gn', 'kk', 'bad', 'ktokogo', 'arenda'}
 
-# Состояния калькулятора
 CALC_FORMAT, CALC_PROG, CALC_PEOPLE, CALC_DISTANCE, \
 CALC_BIRTHDAY, CALC_TODAY, CALC_RS, CALC_VELKOM_T = range(40, 48)
-CALC_STUDIO_DUR = 48
+CALC_STUDIO_DUR  = 48
+CALC_STUDIO_TYPE = 49
+CALC_DISCOUNT    = 50
 
 def _dur_hours(dur_str):
     s = str(dur_str).strip().lower()
@@ -1127,45 +1132,130 @@ def _logistics(km):
     if km <= 20: return 5000
     return 5000 + _math.ceil((km - 20) / 10) * 3000
 
+def _h_fmt(h):
+    if h == int(h): return str(int(h))
+    return str(h).replace('.', ',')
+
+def _prog_str(sel):
+    parts = []
+    for bid, dur in sel.items():
+        name = BLOCK_NAMES.get(bid, bid)
+        parts.append(f"• {dur} — {name}")
+    return '\n'.join(parts)
+
+def _studio_offer(hall, sel, people, has_birthday, discount, rs):
+    gh = _game_hours(sel)
+    if gh == 0:
+        gh = sum(_dur_hours(d) for d in sel.values()) or 1.0
+    tier = _studio_tier(gh)
+    rate = STUDIO_RATES.get((hall, tier), 1800)
+    min_ppl = STUDIO_MIN_PPL[hall]
+    minimum = STUDIO_MIN_TOTALS.get((hall, tier), rate * min_ppl)
+    eff_ppl = people - (1 if has_birthday and people >= 10 else 0)
+    total = max(rate * eff_ppl, minimum)
+    if discount:
+        if discount['type'] == 'fixed':
+            total -= discount['value']
+        elif discount['type'] == 'pct':
+            total = int(total * (1 - discount['value'] / 100))
+    if rs: total = int(total * 1.1)
+
+    total_h = sum(_dur_hours(d) for d in sel.values()) or gh
+    h_str = _h_fmt(total_h)
+    prog_text = _prog_str(sel)
+    min_note = "10" if hall == "велком" else "8"
+    add_velkom = not (tier >= 3.0 and 'velkom' in sel)
+
+    offer = (
+        f"Стоимость игры в студии:\n"
+        f"{total:,} руб/чел за {h_str} часовую программу:\n".replace(',', ' ') +
+        f"{prog_text}\n"
+        f"Минимальная плата за игру вносится за {min_note} чел\n"
+    )
+    if add_velkom:
+        offer += "За 20 минут до игры велком зона предоставляется бесплатно 🙌\n"
+    offer += (
+        "Именинник в компании от 10 человек играет бесплатно 🎁\n"
+        "Мы находимся по адресу: Денисовский переулок 30. стр. 1\n"
+        "https://yandex.ru/maps/-/CLX9FCjI"
+    )
+    if rs:
+        offer += "\n\n*При оплате по расчётному счёту стоимость с +10%*"
+    if discount:
+        if discount['type'] == 'fixed':
+            offer += f"\n💰 Скидка: -{discount['value']:,} руб".replace(',', ' ')
+        elif discount['type'] == 'pct':
+            offer += f"\n💰 Скидка: -{discount['value']}%"
+    return offer, total
+
+def _vyezd_offer(sel, people, km, velkom_type, discount, rs):
+    gh = _game_hours(sel)
+    if gh == 0: gh = 1.0
+    tier = _vyezd_tier(gh)
+    brackets = [10, 15, 20, 25, 30, 35, 40]
+    base = 0
+    for b in brackets:
+        if people <= b:
+            base = VYEZD_BASE.get((tier, b), 0); break
+    total = base
+    if 'vedenie' in sel:
+        total += int(VEDENIE_PER_HOUR * _dur_hours(sel['vedenie']))
+    if 'velkom' in sel and velkom_type:
+        vrate = DISCO_PER_HOUR if velkom_type == 'dj' else VEDENIE_PER_HOUR
+        total += int(vrate * _dur_hours(sel['velkom']))
+    if 'disco' in sel:
+        total += int(DISCO_PER_HOUR * _dur_hours(sel['disco']))
+    log = _logistics(km)
+    total += log
+    if discount:
+        if discount['type'] == 'fixed':
+            total -= discount['value']
+        elif discount['type'] == 'pct':
+            total = int(total * (1 - discount['value'] / 100))
+    if rs: total = int(total * 1.1)
+
+    total_h = sum(_dur_hours(d) for d in sel.values()) or gh
+    h_str = _h_fmt(total_h)
+    prog_text = _prog_str(sel)
+
+    offer = (
+        f"Стоимость выезда на {people} человек составит {total:,} ₽\n\n".replace(',', ' ') +
+        "За эту цену к вам приедет:\n"
+        "🧔🏽‍♂️ красивый ведущий\n"
+        "😎 почти красивый диджей\n"
+        "🎙 всё наше студийное оборудование — колонки, микрофоны, светящиеся тумбы, "
+        "взрывающиеся чаши и т. д. 🎙\n\n"
+        f"🔥 {h_str} часа приколов, смеха, улыбок, зажигательных танцев "
+        f"и запоминающихся эмоций на месяц вперёд гарантирован 🔥\n\n"
+        f"{prog_text}"
+    )
+    if log > 0:
+        offer += f"\n\nЛогистика ({km:.0f} км от МКАД): +{log:,} ₽".replace(',', ' ')
+    if rs:
+        offer += "\n\n*При оплате по расчётному счёту стоимость с +10%*"
+    if discount:
+        if discount['type'] == 'fixed':
+            offer += f"\n💰 Скидка: -{discount['value']:,} ₽".replace(',', ' ')
+        elif discount['type'] == 'pct':
+            offer += f"\n💰 Скидка: -{discount['value']}%"
+    return offer, total
+
+# ── Клавиатуры калькулятора ────────────────────────────────────────────────
+
 def kb_calc_format():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏢 Большая студия", callback_data="calc_velkom")],
         [InlineKeyboardButton("🏠 Малая студия",   callback_data="calc_lanzh")],
-        [InlineKeyboardButton("🚗 Выезд",          callback_data="calc_vyezd")],
-        [InlineKeyboardButton("❌ Отмена",          callback_data="cancel")],
+        [InlineKeyboardButton("🚗 Выезд",           callback_data="calc_vyezd")],
+        [InlineKeyboardButton("❌ Отмена",           callback_data="cancel")],
     ])
 
-CALC_PROG_BLOCKS = [
-    ("gn",      "Good Night / Сценарий"),
-    ("velkom",  "Велком"),
-    ("disco",   "Дискотека с диджеем"),
-    ("vedenie", "Ведение"),
-]
-CALC_GN_DURATIONS = ["1 час", "1.5 часа", "2 часа"]
-
-def kb_calc_prog(sel, dur_mode=None):
-    rows = []
-    for bid, bname in CALC_PROG_BLOCKS:
-        is_on = bid in sel
-        icon = "✅" if is_on else "☐"
-        dur = sel.get(bid, get_base_dur(bid, 'free')) if is_on else ""
-        label = f"{icon} {bname}" + (f" — {dur}" if dur else "")
-        # Выбор длительности
-        if is_on and dur_mode == bid:
-            durs = CALC_GN_DURATIONS if bid == "gn" else DURATIONS
-            rows.append([InlineKeyboardButton(
-                ("▶ " if d == sel.get(bid) else "") + d,
-                callback_data=f"dur_{bid}_{d}"
-            ) for d in durs])
-        row = [InlineKeyboardButton(label, callback_data=f"tog_{bid}")]
-        if is_on and bid not in FIXED_DUR and dur_mode != bid:
-            row.append(InlineKeyboardButton("⏱", callback_data=f"editdur_{bid}"))
-        rows.append(row)
-    rows.append([
-        InlineKeyboardButton("✔ Готово",  callback_data="calc_prog_done"),
-        InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
+def kb_calc_studio_type():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎮 Игра (1 сценарий)",          callback_data="st_game")],
+        [InlineKeyboardButton("📦 Пакет (несколько блоков)",   callback_data="st_packet")],
+        [InlineKeyboardButton("❌ Отмена",                      callback_data="cancel")],
     ])
-    return InlineKeyboardMarkup(rows)
 
 def kb_calc_studio_dur():
     return InlineKeyboardMarkup([
@@ -1176,25 +1266,20 @@ def kb_calc_studio_dur():
         [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
     ])
 
+# ── Хендлеры калькулятора ──────────────────────────────────────────────────
+
 async def calc_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     try:
-        await query.edit_message_text(
-            "Выберите формат мероприятия:",
-            reply_markup=kb_calc_format()
-        )
+        await query.edit_message_text("Выберите формат мероприятия:", reply_markup=kb_calc_format())
     except Exception:
-        msg = await query.message.reply_text(
-            "Выберите формат мероприятия:",
-            reply_markup=kb_calc_format()
-        )
+        msg = await query.message.reply_text("Выберите формат мероприятия:", reply_markup=kb_calc_format())
         track(ctx, msg.message_id)
     return CALC_FORMAT
 
 async def calc_got_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    query = update.callback_query; await query.answer()
     fmt_map = {"calc_vyezd": "vyezd", "calc_velkom": "велком", "calc_lanzh": "лаунж"}
     fmt = fmt_map.get(query.data, "vyezd")
     ctx.user_data["calc_fmt"] = fmt
@@ -1202,16 +1287,36 @@ async def calc_got_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["calc_dur_mode"] = None
     if fmt == "vyezd":
         await query.edit_message_text(
-            "Выбери программу выезда:",
-            reply_markup=kb_calc_prog({})
+            "Выбери программу выезда (⏱ меняет время, ↑↓ порядок):",
+            reply_markup=kb_program({}, 'free', done_cb='calc_prog_done')
         )
         return CALC_PROG
     else:
-        await query.edit_message_text(
-            "Выбери длительность программы:",
-            reply_markup=kb_calc_studio_dur()
-        )
+        await query.edit_message_text("Выбери формат программы:", reply_markup=kb_calc_studio_type())
+        return CALC_STUDIO_TYPE
+
+async def calc_studio_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    ctx.user_data["calc_studio_mode"] = "game" if q.data == "st_game" else "packet"
+    if q.data == "st_game":
+        await q.edit_message_text("Выбери длительность программы:", reply_markup=kb_calc_studio_dur())
         return CALC_STUDIO_DUR
+    else:
+        await q.edit_message_text(
+            "Выбери программу (⏱ меняет время, ↑↓ порядок):",
+            reply_markup=kb_program({}, 'free', done_cb='calc_prog_done')
+        )
+        return CALC_PROG
+
+async def calc_studio_dur(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    hours = float(q.data.replace("sd_", ""))
+    dur_map = {1.0: "1 час", 1.5: "1.5 часа", 2.0: "2 часа", 3.0: "3 часа"}
+    dur_str = dur_map.get(hours, "1 час")
+    ctx.user_data["calc_sel"] = {"gn": dur_str}
+    ctx.user_data["calc_studio_hours"] = hours
+    await q.edit_message_text("Сколько человек?")
+    return CALC_PEOPLE
 
 async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -1220,8 +1325,10 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "cancel":
         await delete_tracked(ctx, q.message.chat_id)
-        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
-        track(ctx, msg.message_id)
+        try:
+            await q.edit_message_text("Главное меню:", reply_markup=kb_main())
+        except Exception:
+            pass
         return ConversationHandler.END
 
     if data.startswith('tog_'):
@@ -1235,7 +1342,6 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if i > 0:
             keys[i], keys[i-1] = keys[i-1], keys[i]
             sel = {k: sel[k] for k in keys}
-        ctx.user_data['calc_sel'] = sel
         ctx.user_data['calc_dur_mode'] = None
     elif data.startswith('dn_'):
         bid = data[3:]
@@ -1243,7 +1349,6 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if i < len(keys)-1:
             keys[i], keys[i+1] = keys[i+1], keys[i]
             sel = {k: sel[k] for k in keys}
-        ctx.user_data['calc_sel'] = sel
         ctx.user_data['calc_dur_mode'] = None
     elif data.startswith('editdur_'):
         ctx.user_data['calc_dur_mode'] = data[8:]
@@ -1251,10 +1356,10 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _, bid, dur = data.split('_', 2)
         sel[bid] = dur; ctx.user_data['calc_dur_mode'] = None
     elif data == 'calc_prog_done':
-        if not sel or 'gn' not in sel:
+        if not sel:
             await q.edit_message_text(
-                "Выбери хотя бы Good Night!",
-                reply_markup=kb_calc_prog(sel)
+                "Выбери хотя бы один блок!",
+                reply_markup=kb_program({}, 'free', done_cb='calc_prog_done')
             )
             return CALC_PROG
         ctx.user_data['calc_sel'] = sel
@@ -1263,16 +1368,9 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ctx.user_data['calc_sel'] = sel
     await q.edit_message_reply_markup(
-        reply_markup=kb_calc_prog(sel, ctx.user_data.get('calc_dur_mode'))
+        reply_markup=kb_program(sel, 'free', ctx.user_data.get('calc_dur_mode'), done_cb='calc_prog_done')
     )
     return CALC_PROG
-
-async def calc_studio_dur(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    hours = float(q.data.replace("sd_", ""))
-    ctx.user_data["calc_studio_hours"] = hours
-    await q.edit_message_text("Сколько человек?")
-    return CALC_PEOPLE
 
 async def calc_got_people(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1284,17 +1382,15 @@ async def calc_got_people(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return CALC_PEOPLE
     ctx.user_data["calc_people"] = people
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-
     fmt = ctx.user_data.get("calc_fmt")
     sel = ctx.user_data.get("calc_sel", {})
-
     if fmt == "vyezd":
         if "velkom" in sel:
             msg = await update.message.reply_text(
                 "Велком на выезде: с диджеем или с ведущим?",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🎵 С диджеем",   callback_data="vt_dj")],
-                    [InlineKeyboardButton("🎤 С ведущим",   callback_data="vt_vedushchy")],
+                    [InlineKeyboardButton("🎵 С диджеем",  callback_data="vt_dj")],
+                    [InlineKeyboardButton("🎤 С ведущим",  callback_data="vt_vedushchy")],
                 ])
             )
             track(ctx, msg.message_id)
@@ -1318,9 +1414,7 @@ async def calc_got_people(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def calc_velkom_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     ctx.user_data["calc_velkom_type"] = "dj" if q.data == "vt_dj" else "vedushchy"
-    await q.edit_message_text(
-        "Расстояние от МКАД (км)?\nЕсли в пределах МКАД — напиши 0"
-    )
+    await q.edit_message_text("Расстояние от МКАД (км)?\nЕсли в пределах МКАД — напиши 0")
     return CALC_DISTANCE
 
 async def calc_got_distance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1334,6 +1428,42 @@ async def calc_got_distance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["calc_km"] = km
     await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
     msg = await update.message.reply_text(
+        "Скидка?\nНапиши сумму (например: 2000) или процент (например: 10%)\nИли нажми кнопку:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Без скидки", callback_data="disc_none")],
+        ])
+    )
+    track(ctx, msg.message_id)
+    return CALC_DISCOUNT
+
+async def calc_got_birthday(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    ctx.user_data["calc_birthday"] = q.data == "bday_yes"
+    await q.edit_message_text(
+        "Скидка?\nНапиши сумму (например: 2000) или процент (например: 10%)\nИли нажми кнопку:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Без скидки", callback_data="disc_none")],
+        ])
+    )
+    return CALC_DISCOUNT
+
+async def calc_got_discount_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Пользователь написал скидку текстом: '2000' или '10%'."""
+    text = update.message.text.strip().replace(' ', '')
+    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
+    if text.endswith('%'):
+        try:
+            pct = float(text[:-1].replace(',', '.'))
+            ctx.user_data["calc_discount"] = {"type": "pct", "value": pct}
+        except ValueError:
+            ctx.user_data["calc_discount"] = None
+    else:
+        raw = ''.join(filter(str.isdigit, text))
+        try:
+            ctx.user_data["calc_discount"] = {"type": "fixed", "value": int(raw)}
+        except ValueError:
+            ctx.user_data["calc_discount"] = None
+    msg = await update.message.reply_text(
         "Оплата по расчётному счёту?",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("💳 Нет, обычная", callback_data="rs_no"),
@@ -1343,21 +1473,10 @@ async def calc_got_distance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     track(ctx, msg.message_id)
     return CALC_RS
 
-async def calc_got_birthday(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def calc_got_discount_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Кнопка 'Без скидки'."""
     q = update.callback_query; await q.answer()
-    ctx.user_data["calc_birthday"] = q.data == "bday_yes"
-    await q.edit_message_text(
-        "Бронирование в день обращения?",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Да (-2000 руб)", callback_data="today_yes"),
-             InlineKeyboardButton("Нет",               callback_data="today_no")],
-        ])
-    )
-    return CALC_TODAY
-
-async def calc_got_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    ctx.user_data["calc_today_disc"] = q.data == "today_yes"
+    ctx.user_data["calc_discount"] = None
     await q.edit_message_text(
         "Оплата по расчётному счёту?",
         reply_markup=InlineKeyboardMarkup([
@@ -1368,123 +1487,33 @@ async def calc_got_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return CALC_RS
 
 async def calc_got_rs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
+    query = update.callback_query; await query.answer()
     fmt    = ctx.user_data.get("calc_fmt", "vyezd")
     sel    = ctx.user_data.get("calc_sel", {})
     people = ctx.user_data.get("calc_people", 10)
     rs     = query.data == "rs_yes"
-
     menu_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Новый расчёт", callback_data="menu_calc")],
         [InlineKeyboardButton("◀ В меню",        callback_data="menu_back")],
     ])
-
     if fmt == "vyezd":
         km          = ctx.user_data.get("calc_km", 0)
         velkom_type = ctx.user_data.get("calc_velkom_type")
-
-        gh = _game_hours(sel)
-        if gh == 0:
-            await query.edit_message_text(
-                "Не выбраны основные блоки программы (GN, KS, и т.д.)\nНачни заново.",
-                reply_markup=menu_kb
-            )
+        if _game_hours(sel) == 0:
+            await query.edit_message_text("Не выбраны основные блоки. Начни заново.", reply_markup=menu_kb)
             return ConversationHandler.END
-
-        tier = _vyezd_tier(gh)
-        brackets = [10, 15, 20, 25, 30, 35, 40]
-        base = 0
-        for b in brackets:
-            if people <= b:
-                base = VYEZD_BASE.get((tier, b), 0)
-                break
-
-        if base == 0:
-            await query.edit_message_text(
-                "Более 40 человек рассчитывается индивидуально.\nСвяжитесь с менеджером.",
-                reply_markup=menu_kb
-            )
+        if people > 40:
+            await query.edit_message_text("Более 40 человек — рассчитывается индивидуально.", reply_markup=menu_kb)
             return ConversationHandler.END
-
-        total = base
-        lines = ["🧮 Расчёт стоимости выезда\n"]
-        lines.append(f"Программа: {tier} ч основной программы")
-        lines.append(f"Гостей: {people} чел")
-        lines.append(f"База: {base:,} ₽".replace(',', ' '))
-
-        if 'vedenie' in sel:
-            vh = _dur_hours(sel['vedenie'])
-            vp = int(VEDENIE_PER_HOUR * vh)
-            total += vp
-            lines.append(f"Ведение ({sel['vedenie']}): +{vp:,} ₽".replace(',', ' '))
-
-        if 'velkom' in sel and velkom_type:
-            vkh = _dur_hours(sel['velkom'])
-            rate = DISCO_PER_HOUR if velkom_type == 'dj' else VEDENIE_PER_HOUR
-            vkp = int(rate * vkh)
-            total += vkp
-            t = "DJ" if velkom_type == "dj" else "ведущий"
-            lines.append(f"Велком с {t} ({sel['velkom']}): +{vkp:,} ₽".replace(',', ' '))
-
-        if 'disco' in sel:
-            dh = _dur_hours(sel['disco'])
-            dp = int(DISCO_PER_HOUR * dh)
-            total += dp
-            lines.append(f"Дискотека ({sel['disco']}): +{dp:,} ₽".replace(',', ' '))
-
-        log = _logistics(km)
-        if log > 0:
-            total += log
-            lines.append(f"Логистика ({km:.0f} км от МКАД): +{log:,} ₽".replace(',', ' '))
-
-        if rs:
-            total = int(total * 1.1)
-            lines.append("Оплата по РС: +10%")
-
-        lines.append(f"\n💰 Итого: {total:,} ₽".replace(',', ' '))
-
+        discount = ctx.user_data.get('calc_discount')
+        offer, _ = _vyezd_offer(sel, people, km, velkom_type, discount, rs)
     else:
-        hall        = fmt
+        hall         = fmt
         has_birthday = ctx.user_data.get("calc_birthday", False)
-        today_disc  = ctx.user_data.get("calc_today_disc", False)
-
-        gh = ctx.user_data.get("calc_studio_hours", _game_hours(sel))
-        if gh == 0: gh = 1.0
-
-        tier   = _studio_tier(gh)
-        rate   = STUDIO_RATES.get((hall, tier), 0)
-        minppl = STUDIO_MIN_PPL[hall]
-        minimum = STUDIO_MIN_TOTALS.get((hall, tier), rate * minppl)
-
-        eff_people = people
-        if has_birthday and people >= 10:
-            eff_people -= 1
-
-        total = max(rate * eff_people, minimum)
-
-        lines = [f"🧮 Расчёт стоимости ({'Большая студия' if hall == 'велком' else 'Малая студия'})\n"]
-        lines.append(f"Программа: {tier} ч → {rate:,} руб/чел".replace(',', ' '))
-        lines.append(f"Гостей: {people} чел")
-
-        if has_birthday and people >= 10:
-            lines.append(f"Именинник: -1 чел (бесплатно)")
-
-        if rate * eff_people < minimum:
-            lines.append(f"Применена минималка: {minimum:,} руб".replace(',', ' '))
-
-        if today_disc:
-            total -= 2000
-            lines.append("Бронь сегодня: -2 000 руб")
-
-        if rs:
-            total = int(total * 1.1)
-            lines.append("Оплата по РС: +10%")
-
-        lines.append(f"\n💰 Итого: {total:,} руб".replace(',', ' '))
-
-    await query.edit_message_text('\n'.join(lines), reply_markup=menu_kb)
+        today_disc   = ctx.user_data.get("calc_today_disc", False)
+        discount     = ctx.user_data.get('calc_discount')
+        offer, _     = _studio_offer(hall, sel, people, has_birthday, discount, rs)
+    await query.edit_message_text(offer, reply_markup=menu_kb)
     return ConversationHandler.END
 
 
@@ -2197,23 +2226,27 @@ def main():
         entry_points=[
             CallbackQueryHandler(calc_start, pattern=r'^menu_calc$'),
         ],
-        allow_reentry=True,
         states={
-            CALC_FORMAT:   [CallbackQueryHandler(calc_got_format,  pattern=r'^calc_')],
-            CALC_STUDIO_DUR: [CallbackQueryHandler(calc_studio_dur, pattern=r'^sd_')],
-            CALC_PROG:     [CallbackQueryHandler(calc_program_cb)],
-            CALC_PEOPLE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, calc_got_people)],
-            CALC_DISTANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, calc_got_distance)],
-            CALC_BIRTHDAY: [CallbackQueryHandler(calc_got_birthday, pattern=r'^bday_')],
-            CALC_TODAY:    [CallbackQueryHandler(calc_got_today,    pattern=r'^today_')],
-            CALC_RS:       [CallbackQueryHandler(calc_got_rs,       pattern=r'^rs_')],
-            CALC_VELKOM_T: [CallbackQueryHandler(calc_velkom_type,  pattern=r'^vt_')],
+            CALC_FORMAT:     [CallbackQueryHandler(calc_got_format,   pattern=r'^calc_')],
+            CALC_STUDIO_TYPE:[CallbackQueryHandler(calc_studio_type,  pattern=r'^st_')],
+            CALC_STUDIO_DUR: [CallbackQueryHandler(calc_studio_dur,   pattern=r'^sd_')],
+            CALC_PROG:       [CallbackQueryHandler(calc_program_cb)],
+            CALC_PEOPLE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, calc_got_people)],
+            CALC_DISTANCE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, calc_got_distance)],
+            CALC_BIRTHDAY:   [CallbackQueryHandler(calc_got_birthday, pattern=r'^bday_')],
+            CALC_DISCOUNT:   [
+                CallbackQueryHandler(calc_got_discount_cb, pattern=r'^disc_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, calc_got_discount_text),
+            ],
+            CALC_RS:         [CallbackQueryHandler(calc_got_rs,       pattern=r'^rs_')],
+            CALC_VELKOM_T:   [CallbackQueryHandler(calc_velkom_type,  pattern=r'^vt_')],
         },
         fallbacks=[
             CallbackQueryHandler(menu_cb, pattern=r'^(cancel|menu_back|menu_calc)$'),
             CommandHandler("start", cmd_start),
         ],
         per_message=False,
+        allow_reentry=True,
     )
 
     kp_conv = ConversationHandler(
