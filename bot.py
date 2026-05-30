@@ -1099,6 +1099,7 @@ GAME_BLOCKS_SET  = {'gn', 'kk', 'bad', 'ktokogo', 'arenda'}
 # Состояния калькулятора
 CALC_FORMAT, CALC_PROG, CALC_PEOPLE, CALC_DISTANCE, \
 CALC_BIRTHDAY, CALC_TODAY, CALC_RS, CALC_VELKOM_T = range(40, 48)
+CALC_STUDIO_DUR = 48
 
 def _dur_hours(dur_str):
     s = str(dur_str).strip().lower()
@@ -1128,22 +1129,67 @@ def _logistics(km):
 
 def kb_calc_format():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏢 Студия велком", callback_data="calc_velkom")],
-        [InlineKeyboardButton("🏠 Студия лаунж",  callback_data="calc_lanzh")],
+        [InlineKeyboardButton("🏢 Большая студия", callback_data="calc_velkom")],
+        [InlineKeyboardButton("🏠 Малая студия",   callback_data="calc_lanzh")],
         [InlineKeyboardButton("🚗 Выезд",          callback_data="calc_vyezd")],
         [InlineKeyboardButton("❌ Отмена",          callback_data="cancel")],
+    ])
+
+CALC_PROG_BLOCKS = [
+    ("gn",      "Good Night / Сценарий"),
+    ("velkom",  "Велком"),
+    ("disco",   "Дискотека с диджеем"),
+    ("vedenie", "Ведение"),
+]
+CALC_GN_DURATIONS = ["1 час", "1.5 часа", "2 часа"]
+
+def kb_calc_prog(sel, dur_mode=None):
+    rows = []
+    for bid, bname in CALC_PROG_BLOCKS:
+        is_on = bid in sel
+        icon = "✅" if is_on else "☐"
+        dur = sel.get(bid, get_base_dur(bid, 'free')) if is_on else ""
+        label = f"{icon} {bname}" + (f" — {dur}" if dur else "")
+        # Выбор длительности
+        if is_on and dur_mode == bid:
+            durs = CALC_GN_DURATIONS if bid == "gn" else DURATIONS
+            rows.append([InlineKeyboardButton(
+                ("▶ " if d == sel.get(bid) else "") + d,
+                callback_data=f"dur_{bid}_{d}"
+            ) for d in durs])
+        row = [InlineKeyboardButton(label, callback_data=f"tog_{bid}")]
+        if is_on and bid not in FIXED_DUR and dur_mode != bid:
+            row.append(InlineKeyboardButton("⏱", callback_data=f"editdur_{bid}"))
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("✔ Готово",  callback_data="calc_prog_done"),
+        InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+def kb_calc_studio_dur():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("1 час",    callback_data="sd_1.0"),
+         InlineKeyboardButton("1.5 часа", callback_data="sd_1.5")],
+        [InlineKeyboardButton("2 часа",   callback_data="sd_2.0"),
+         InlineKeyboardButton("3 часа",   callback_data="sd_3.0")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
     ])
 
 async def calc_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await safe_delete(ctx.bot, query.message.chat_id, query.message.message_id)
-    msg = await ctx.bot.send_message(
-        query.message.chat_id,
-        "Выберите формат мероприятия:",
-        reply_markup=kb_calc_format()
-    )
-    track(ctx, msg.message_id)
+    try:
+        await query.edit_message_text(
+            "Выберите формат мероприятия:",
+            reply_markup=kb_calc_format()
+        )
+    except Exception:
+        msg = await query.message.reply_text(
+            "Выберите формат мероприятия:",
+            reply_markup=kb_calc_format()
+        )
+        track(ctx, msg.message_id)
     return CALC_FORMAT
 
 async def calc_got_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1154,11 +1200,18 @@ async def calc_got_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["calc_fmt"] = fmt
     ctx.user_data["calc_sel"] = {}
     ctx.user_data["calc_dur_mode"] = None
-    await query.edit_message_text(
-        "Выбери программу (⏱ меняет время, ↑↓ меняет порядок):",
-        reply_markup=kb_program({}, 'free', done_cb='calc_prog_done')
-    )
-    return CALC_PROG
+    if fmt == "vyezd":
+        await query.edit_message_text(
+            "Выбери программу выезда:",
+            reply_markup=kb_calc_prog({})
+        )
+        return CALC_PROG
+    else:
+        await query.edit_message_text(
+            "Выбери длительность программы:",
+            reply_markup=kb_calc_studio_dur()
+        )
+        return CALC_STUDIO_DUR
 
 async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -1198,10 +1251,10 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         _, bid, dur = data.split('_', 2)
         sel[bid] = dur; ctx.user_data['calc_dur_mode'] = None
     elif data == 'calc_prog_done':
-        if not sel:
+        if not sel or 'gn' not in sel:
             await q.edit_message_text(
-                "Выбери хотя бы один блок!",
-                reply_markup=kb_program({}, 'free', done_cb='calc_prog_done')
+                "Выбери хотя бы Good Night!",
+                reply_markup=kb_calc_prog(sel)
             )
             return CALC_PROG
         ctx.user_data['calc_sel'] = sel
@@ -1210,9 +1263,16 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ctx.user_data['calc_sel'] = sel
     await q.edit_message_reply_markup(
-        reply_markup=kb_program(sel, 'free', ctx.user_data.get('calc_dur_mode'), done_cb='calc_prog_done')
+        reply_markup=kb_calc_prog(sel, ctx.user_data.get('calc_dur_mode'))
     )
     return CALC_PROG
+
+async def calc_studio_dur(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    hours = float(q.data.replace("sd_", ""))
+    ctx.user_data["calc_studio_hours"] = hours
+    await q.edit_message_text("Сколько человек?")
+    return CALC_PEOPLE
 
 async def calc_got_people(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1390,7 +1450,7 @@ async def calc_got_rs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         has_birthday = ctx.user_data.get("calc_birthday", False)
         today_disc  = ctx.user_data.get("calc_today_disc", False)
 
-        gh = _game_hours(sel)
+        gh = ctx.user_data.get("calc_studio_hours", _game_hours(sel))
         if gh == 0: gh = 1.0
 
         tier   = _studio_tier(gh)
@@ -1404,7 +1464,7 @@ async def calc_got_rs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         total = max(rate * eff_people, minimum)
 
-        lines = [f"🧮 Расчёт стоимости студии ({hall})\n"]
+        lines = [f"🧮 Расчёт стоимости ({'Большая студия' if hall == 'велком' else 'Малая студия'})\n"]
         lines.append(f"Программа: {tier} ч → {rate:,} руб/чел".replace(',', ' '))
         lines.append(f"Гостей: {people} чел")
 
@@ -1451,8 +1511,12 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Тип заказчика:", reply_markup=kb_doc_type())
         track(ctx, saved_mid)
         return DOC_TYPE
-    elif query.data == "menu_back":
-        await query.edit_message_text("Главное меню:", reply_markup=kb_main())
+    elif query.data in ("menu_back", "cancel"):
+        try:
+            await query.edit_message_text("Главное меню:", reply_markup=kb_main())
+        except Exception:
+            msg = await query.message.reply_text("Главное меню:", reply_markup=kb_main())
+            track(ctx, msg.message_id)
 
 async def cmd_kp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
@@ -1611,11 +1675,10 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if q.data in ('confirm_no', 'cancel'):
         await delete_tracked(ctx, chat_id)
         try:
-            await q.edit_message_reply_markup(reply_markup=None)
+            await q.edit_message_text("Главное меню:", reply_markup=kb_main())
         except Exception:
-            pass
-        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
-        track(ctx, msg.message_id)
+            msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+            track(ctx, msg.message_id)
         return ConversationHandler.END
     await q.edit_message_text("Готовлю КП...")
     try:
@@ -1770,11 +1833,10 @@ async def doc_form_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if q.data == "cancel":
         await delete_tracked(ctx, q.message.chat_id)
         try:
-            await q.edit_message_reply_markup(reply_markup=None)
+            await q.edit_message_text("Главное меню:", reply_markup=kb_main())
         except Exception:
-            pass
-        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
-        track(ctx, msg.message_id)
+            msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+            track(ctx, msg.message_id)
         return ConversationHandler.END
     return DOC_FREE_INPUT
 
@@ -2067,11 +2129,10 @@ async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if q.data in ('doc_confirm_no', 'cancel'):
         await delete_tracked(ctx, chat_id)
         try:
-            await q.edit_message_reply_markup(reply_markup=None)
+            await q.edit_message_text("Главное меню:", reply_markup=kb_main())
         except Exception:
-            pass
-        msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
-        track(ctx, msg.message_id)
+            msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
+            track(ctx, msg.message_id)
         return ConversationHandler.END
     await q.edit_message_text("Готовлю документы...")
     try:
@@ -2114,8 +2175,6 @@ async def global_doc_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("start",  "Главное меню"),
-        BotCommand("kp",     "Создать КП"),
-        BotCommand("docs",   "Документы"),
         BotCommand("cancel", "Отменить"),
     ])
 
@@ -2137,6 +2196,7 @@ def main():
         ],
         states={
             CALC_FORMAT:   [CallbackQueryHandler(calc_got_format,  pattern=r'^calc_')],
+            CALC_STUDIO_DUR: [CallbackQueryHandler(calc_studio_dur, pattern=r'^sd_')],
             CALC_PROG:     [CallbackQueryHandler(calc_program_cb)],
             CALC_PEOPLE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, calc_got_people)],
             CALC_DISTANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, calc_got_distance)],
@@ -2217,7 +2277,7 @@ def main():
     app.add_handler(kp_conv)
     app.add_handler(doc_conv)
     app.add_handler(CallbackQueryHandler(menu_cb, pattern=r'^menu_back$'))
-    app.add_handler(CallbackQueryHandler(global_doc_confirm_cb, pattern=r'^(doc_confirm_no|doc_confirm_yes|cancel)$'))
+    app.add_handler(CallbackQueryHandler(global_doc_confirm_cb, pattern=r'^(doc_confirm_no|doc_confirm_yes)$'))
 
     print("Bot started...")
     app.run_polling()
