@@ -518,7 +518,7 @@ def kb_format():
         [InlineKeyboardButton("❌ Отмена",          callback_data="cancel")],
     ])
 
-def kb_program(sel, fmt, dur_mode=None, done_cb="prog_done"):
+def kb_program(sel, fmt, dur_mode=None, done_cb="prog_done", exclude=None):
     """
     sel = OrderedDict: {bid: dur} в порядке выбора пользователя.
     Выбранные блоки показываются в порядке выбора со стрелками ↑↓.
@@ -527,6 +527,9 @@ def kb_program(sel, fmt, dur_mode=None, done_cb="prog_done"):
     rows = []
     # Сначала выбранные — в порядке выбора
     sel_list = list(sel.keys())
+    # Фильтруем исключённые блоки из уже выбранных
+    if exclude:
+        sel_list = [b for b in sel_list if b not in exclude]
     for n, bid in enumerate(sel_list, 1):
         bname = next(bn for b, bn in PROGRAM_BLOCKS if b == bid)
         is_fixed = bid in FIXED_DUR
@@ -552,9 +555,9 @@ def kb_program(sel, fmt, dur_mode=None, done_cb="prog_done"):
                 row.append(up)
                 row.append(down)
         rows.append(row)
-    # Потом невыбранные
+    # Потом невыбранные (без исключённых)
     for bid, bname in PROGRAM_BLOCKS:
-        if bid not in sel:
+        if bid not in sel and (not exclude or bid not in exclude):
             rows.append([InlineKeyboardButton(f"☐  {bname}", callback_data=f"tog_{bid}")])
     rows.append([
         InlineKeyboardButton("✔ Готово",  callback_data=done_cb),
@@ -1104,7 +1107,9 @@ VYEZD_BASE = {
 }
 VEDENIE_PER_HOUR = 14000
 DISCO_PER_HOUR   = 9000
-GAME_BLOCKS_SET  = {'gn', 'kk', 'bad', 'ktokogo', 'arenda'}
+GAME_BLOCKS_SET       = {'gn', 'kk', 'bad', 'ktokogo', 'arenda'}
+VYEZD_GAME_BLOCKS_SET = {'gn', 'kk', 'bad', 'ktokogo'}   # без аренды
+VYEZD_EXCLUDE         = {'arenda'}                         # блоки скрытые на выезде
 
 CALC_FORMAT, CALC_PROG, CALC_PEOPLE, CALC_DISTANCE, \
 CALC_BIRTHDAY, CALC_TODAY, CALC_RS, CALC_VELKOM_T = range(40, 48)
@@ -1187,7 +1192,7 @@ def _studio_offer(hall, sel, people, has_birthday, discount, rs):
 
     offer = (
         f"Стоимость игры в студии:\n"
-        f"{eff_rate:,} руб/чел за {h_str} часовую программу:\n".replace(",", " ") +
+        f"{eff_rate:,} руб/чел за:\n".replace(",", " ") +
         disc_line +
         rs_line +
         f"{prog_text}\n"
@@ -1253,8 +1258,6 @@ def _vyezd_offer(sel, people, km, velkom_type, discount, rs):
         f"и запоминающихся эмоций на месяц вперёд гарантирован 🔥\n\n"
         f"{prog_text}"
     )
-    if log > 0:
-        offer += f"\n\nЛогистика ({km:.0f} км от МКАД): +{log:,} ₽".replace(",", " ")
     return offer, total
 
 # ── Клавиатуры калькулятора ────────────────────────────────────────────────
@@ -1305,7 +1308,7 @@ async def calc_got_format(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if fmt == "vyezd":
         await query.edit_message_text(
             "Выбери программу выезда (⏱ меняет время, ↑↓ порядок):",
-            reply_markup=kb_program({}, 'free', done_cb='calc_prog_done')
+            reply_markup=kb_program({}, 'free', done_cb='calc_prog_done', exclude=VYEZD_EXCLUDE)
         )
         return CALC_PROG
     else:
@@ -1384,8 +1387,10 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return CALC_PEOPLE
 
     ctx.user_data['calc_sel'] = sel
+    fmt = ctx.user_data.get('calc_fmt', 'vyezd')
+    excl = VYEZD_EXCLUDE if fmt == 'vyezd' else None
     await q.edit_message_reply_markup(
-        reply_markup=kb_program(sel, 'free', ctx.user_data.get('calc_dur_mode'), done_cb='calc_prog_done')
+        reply_markup=kb_program(sel, 'free', ctx.user_data.get('calc_dur_mode'), done_cb='calc_prog_done', exclude=excl)
     )
     return CALC_PROG
 
@@ -1835,14 +1840,21 @@ def _parse_free_input(text):
 
     return result
 
-def _missing_fields(d):
-    fields = [
-        ('doc_num',    'номер договора'),
-        ('date_event', 'дата мероприятия (дд.мм.гггг)'),
-        ('time_event', 'время (например: 19:00 — 21:00)'),
-        ('address',    'адрес проведения'),
-        ('price',      'стоимость (рублей)'),
-    ]
+def _missing_fields(d, doc_set='full'):
+    if doc_set == 'schet_akt':
+        fields = [
+            ('doc_num',    'номер счёта'),
+            ('date_event', 'дата мероприятия (дд.мм.гггг)'),
+            ('price',      'стоимость (рублей)'),
+        ]
+    else:
+        fields = [
+            ('doc_num',    'номер договора'),
+            ('date_event', 'дата мероприятия (дд.мм.гггг)'),
+            ('time_event', 'время (например: 19:00 — 21:00)'),
+            ('address',    'адрес проведения'),
+            ('price',      'стоимость (рублей)'),
+        ]
     return [(k, lbl) for k, lbl in fields if not d.get(k)]
 
 async def doc_free_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1856,7 +1868,7 @@ async def doc_free_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if v:
             ctx.user_data[k] = v
 
-    missing = _missing_fields(ctx.user_data)
+    missing = _missing_fields(ctx.user_data, ctx.user_data.get('doc_set', 'full'))
     if missing:
         miss_list = ', '.join(lbl for _, lbl in missing)
         msg = await update.message.reply_text(
@@ -1869,9 +1881,15 @@ async def doc_free_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return DOC_FREE_INPUT
 
     # Всё заполнено — идём дальше
-    time_str = ctx.user_data.get('time_event', '')
-    dur = calc_duration(time_str)
-    ctx.user_data['duration'] = dur if dur else '—'
+    doc_set = ctx.user_data.get('doc_set', 'full')
+    if doc_set == 'schet_akt':
+        ctx.user_data.setdefault('time_event', '')
+        ctx.user_data.setdefault('address', 'Денисовский переулок 30, стр. 1')
+        ctx.user_data['duration'] = '—'
+    else:
+        time_str = ctx.user_data.get('time_event', '')
+        dur = calc_duration(time_str)
+        ctx.user_data['duration'] = dur if dur else '—'
     ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
 
     if ctx.user_data.get('doc_type') == 'fiz':
@@ -1908,8 +1926,19 @@ async def doc_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     ctx.user_data['doc_type'] = q.data.replace('type_', '')
     ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
+    doc_set = ctx.user_data.get('doc_set', 'full')
+    if doc_set == 'schet_akt':
+        prompt = (
+            "Напиши данные одним сообщением.\n"
+            "Разделяй символом  \\  с пробелами по бокам\n\n"
+            "Порядок: номер \\ дата \\ стоимость\n\n"
+            "Пример:\n"
+            "12 \\ 15.06.2026 \\ 45000"
+        )
+    else:
+        prompt = FREE_INPUT_PROMPT
     await q.edit_message_text(
-        FREE_INPUT_PROMPT,
+        prompt,
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("❌ Отмена", callback_data="cancel")
         ]])
