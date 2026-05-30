@@ -10,7 +10,6 @@ import tempfile
 import subprocess
 from datetime import date
 from docx import Document as DocxDocument
-from docx.text.paragraph import Paragraph as DocxParagraph
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -54,8 +53,6 @@ DOC_FIZ_PASS   = 23
 DOC_FIZ_ISSUED = 24
 DOC_FIZ_CODE   = 25
 DOC_FREE_INPUT = 26   # свободный ввод данных мероприятия одним сообщением
-DOC_FORM       = 26   # алиас для совместимости
-DOC_FORM_EDIT  = 27   # не используется
 
 # НОВЫЕ состояния для анкеты карточки
 DOC_CARD_REVIEW      = 30   # анкета карточки
@@ -573,12 +570,6 @@ def kb_confirm():
         [InlineKeyboardButton("❌ Отмена",        callback_data="cancel")],
     ])
 
-def kb_card_choice():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ Вставить текст карточки", callback_data="card_text")],
-        [InlineKeyboardButton("❌ Отмена",                   callback_data="cancel")],
-    ])
-
 def kb_doc_type():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏢 ООО / АО",  callback_data="type_ooo")],
@@ -725,50 +716,6 @@ def _date_word(date_str):
     except:
         return date_str
 
-def build_kp(data):
-    loc = data['location']
-    name_gen = data['name']
-    date_str = data['date']
-    time_str = data['time']
-    prog = data['program_lines']
-    price = data['price']
-    address = data.get('address', '')
-    is_vyezd = loc == 'vyezd'
-    template = {'big': TEMPLATE_BIG, 'small': TEMPLATE_SMALL, 'vyezd': TEMPLATE_VYEZD}[loc]
-    loc_label = {'big': 'Большая студия', 'small': 'Малая студия', 'vyezd': 'Выезд'}[loc]
-    safe_date = date_str.replace('/', '-').replace('.', '-')
-    fname_base = f"KP_{data['name']}_{safe_date}_{loc_label}"
-    tmp_dir = tempfile.mkdtemp()
-    pptx_path = os.path.join(tmp_dir, fname_base + ".pptx")
-    work_dir = os.path.join(tmp_dir, 'work')
-    os.makedirs(work_dir)
-    with zipfile.ZipFile(template, 'r') as z:
-        z.extractall(work_dir)
-    s1 = open(os.path.join(work_dir, 'ppt/slides/slide1.xml'), encoding='utf-8').read()
-    s1 = re.sub(r'Программа для [А-Яа-яёЁ]+', f'Программа для {name_gen}', s1)
-    s1 = s1.replace('Программа для имя', f'Программа для {name_gen}')
-    open(os.path.join(work_dir, 'ppt/slides/slide1.xml'), 'w', encoding='utf-8').write(s1)
-    s3 = open(os.path.join(work_dir, 'ppt/slides/slide3.xml'), encoding='utf-8').read()
-    s3 = replace_shape_text(s3, 'TextBox_new_51', f'Дата: {date_str}  |  Время: {time_str}')
-    s3 = replace_shape_text(s3, 'TextBox_new_54', prog)
-    price_label = f'{price} руб (общая стоимость)' if is_vyezd else f'{price} руб/чел'
-    s3 = replace_shape_text(s3, 'TextBox_new_55', price_label)
-    addr = address if is_vyezd else 'Денисовский переулок 30, стр. 1'
-    s3 = replace_shape_text(s3, 'TextBox 13', addr)
-    open(os.path.join(work_dir, 'ppt/slides/slide3.xml'), 'w', encoding='utf-8').write(s3)
-    with zipfile.ZipFile(pptx_path, 'w', zipfile.ZIP_DEFLATED) as z:
-        for root, dirs, files in os.walk(work_dir):
-            for file in files:
-                fp = os.path.join(root, file)
-                z.write(fp, os.path.relpath(fp, work_dir))
-    pdf = convert_to_pdf(pptx_path, tmp_dir)
-    if pdf:
-        return pdf, fname_base + ".pdf", tmp_dir
-    return pptx_path, fname_base + ".pptx", tmp_dir
-
-def docx_replace(xml, old, new):
-    return xml.replace(old, new)
-
 def ensure_docx(template_path, tmp_dir):
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Шаблон не найден: {template_path}")
@@ -797,23 +744,6 @@ def post_process_docx_xml(xml):
     xml = re.sub(r'<w:highlight[^/]*/>', '', xml)
     xml = re.sub(r'<w:highlight\b[^>]*/>', '', xml)
     return xml
-
-def _apply_replacements(body, pairs):
-    for child in body:
-        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-        if tag == 'p':
-            para = DocxParagraph(child, body)
-            full = ''.join(r.text for r in para.runs)
-            nw = full
-            for old, new in pairs:
-                if old:
-                    nw = nw.replace(old, new)
-            if nw != full and para.runs:
-                para.runs[0].text = nw
-                for r in para.runs[1:]:
-                    r.text = ''
-        elif tag in ('tbl', 'tr', 'tc', 'body'):
-            _apply_replacements(child, pairs)
 
 def build_docs(data):
     card         = data.get('card', {})
@@ -1044,15 +974,6 @@ def _month_only(date_str):
     except:
         return date_str
 
-def _full_date(date_str):
-    months = ['', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-              'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
-    try:
-        d, m, y = date_str.split('.')
-        return f'{int(d)} {months[int(m)]} {y}'
-    except:
-        return date_str
-
 def _fmt_price(price_str):
     try:
         n = int(price_str.replace(' ', ''))
@@ -1109,7 +1030,6 @@ VYEZD_BASE = {
 VEDENIE_PER_HOUR = 14000
 DISCO_PER_HOUR   = 9000
 GAME_BLOCKS_SET       = {'gn', 'kk', 'bad', 'ktokogo', 'arenda'}
-VYEZD_GAME_BLOCKS_SET = {'gn', 'kk', 'bad', 'ktokogo'}
 VYEZD_EXCLUDE         = {'arenda'}
 
 # Доп. услуги студии — фиксированная стоимость поверх цены с человека (руб/час)
@@ -1942,23 +1862,6 @@ async def doc_free_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return DOC_CARD
 
 # doc_form_cb и doc_form_edit оставлены как заглушки для совместимости
-async def doc_form_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    if q.data == "cancel":
-        await delete_tracked(ctx, q.message.chat_id)
-        try:
-            await q.edit_message_text("Главное меню:", reply_markup=kb_main())
-        except Exception:
-            msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
-            track(ctx, msg.message_id)
-        return ConversationHandler.END
-    return DOC_FREE_INPUT
-
-async def doc_form_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    return await doc_free_input(update, ctx)
-
-# ── Документы Handlers ───────────────────────────────────────────────────────
-
 async def doc_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.data == "cancel":
@@ -1992,64 +1895,6 @@ async def cmd_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Раздел документов:", reply_markup=kb_docs())
     track(ctx, msg.message_id)
     return DOC_MENU
-
-async def doc_num(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data['doc_num'] = update.message.text.strip()
-    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("Дата мероприятия? (например: 23.05.2026)")
-    track(ctx, msg.message_id)
-    return DOC_DATE_EVENT
-
-async def doc_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data['date_event'] = update.message.text.strip()
-    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("Время мероприятия? (например: 19:00 — 20:30)")
-    track(ctx, msg.message_id)
-    return DOC_TIME
-
-async def doc_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    time_str = update.message.text.strip()
-    ctx.user_data['time_event'] = time_str
-    dur = calc_duration(time_str)
-    ctx.user_data['duration'] = dur if dur else '—'
-    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("Адрес проведения:")
-    track(ctx, msg.message_id)
-    return DOC_ADDR
-
-async def doc_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data['address'] = update.message.text.strip()
-    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text("Стоимость (рублей, цифрами):")
-    track(ctx, msg.message_id)
-    return DOC_PRICE
-
-async def doc_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    raw = update.message.text.strip().replace(' ', '')
-    try:
-        ctx.user_data['price'] = f"{int(''.join(filter(str.isdigit, raw))):,}".replace(',', ' ')
-    except:
-        ctx.user_data['price'] = raw
-    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    ctx.user_data['today'] = __import__('datetime').date.today().strftime('%d.%m.%Y')
-    if ctx.user_data.get('doc_type') == 'fiz':
-        msg = await update.message.reply_text("ФИО заказчика (полностью):")
-        track(ctx, msg.message_id)
-        return DOC_FIZ_FIO
-    msg = await update.message.reply_text(
-        "Вставь текст карточки предприятия заказчика:"
-    )
-    track(ctx, msg.message_id)
-    return DOC_CARD
-
-async def doc_pay_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data['today'] = update.message.text.strip()
-    await safe_delete(ctx.bot, update.message.chat_id, update.message.message_id)
-    msg = await update.message.reply_text(
-        "Вставь текст карточки предприятия заказчика:"
-    )
-    track(ctx, msg.message_id)
-    return DOC_CARD
 
 async def doc_card_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
