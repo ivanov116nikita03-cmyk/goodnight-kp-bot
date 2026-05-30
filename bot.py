@@ -1148,27 +1148,42 @@ def _studio_offer(hall, sel, people, has_birthday, discount, rs):
     if gh == 0:
         gh = sum(_dur_hours(d) for d in sel.values()) or 1.0
     tier = _studio_tier(gh)
-    rate = STUDIO_RATES.get((hall, tier), 1800)
+    base_rate = STUDIO_RATES.get((hall, tier), 1800)
     min_ppl = STUDIO_MIN_PPL[hall]
-    minimum = STUDIO_MIN_TOTALS.get((hall, tier), rate * min_ppl)
-    eff_ppl = people - (1 if has_birthday and people >= 10 else 0)
-    total = max(rate * eff_ppl, minimum)
+    minimum = STUDIO_MIN_TOTALS.get((hall, tier), base_rate * min_ppl)
+
+    # Эффективная цена с человека — применяем скидки и РС
+    eff_rate = base_rate
+    disc_line = ""
     if discount:
-        if discount['type'] == 'fixed':
-            total -= discount['value']
-        elif discount['type'] == 'pct':
-            total = int(total * (1 - discount['value'] / 100))
-    if rs: total = int(total * 1.1)
+        if discount["type"] == "pct":
+            eff_rate = int(base_rate * (1 - discount["value"] / 100))
+            disc_line = f"💰 Скидка -{discount['value']}% → {eff_rate:,} руб/чел\n".replace(",", " ")
+        elif discount["type"] == "fixed":
+            disc_line = f"💰 Скидка: -{discount['value']:,} руб\n".replace(",", " ")
+    rs_line = ""
+    if rs:
+        eff_rate = int(eff_rate * 1.1)
+        rs_line = f"*Оплата по РС +10% → {eff_rate:,} руб/чел*\n".replace(",", " ")
+
+    # Итог для отображения (не в оффере, только для справки)
+    eff_ppl = people - (1 if has_birthday and people >= 10 else 0)
+    total_raw = eff_rate * eff_ppl
+    if discount and discount["type"] == "fixed":
+        total_raw -= discount["value"]
+    total = max(total_raw, minimum)
 
     total_h = sum(_dur_hours(d) for d in sel.values()) or gh
     h_str = _h_fmt(total_h)
     prog_text = _prog_str(sel)
     min_note = "10" if hall == "велком" else "8"
-    add_velkom = not (tier >= 3.0 and 'velkom' in sel)
+    add_velkom = not (tier >= 3.0 and "velkom" in sel)
 
     offer = (
         f"Стоимость игры в студии:\n"
-        f"{total:,} руб/чел за {h_str} часовую программу:\n".replace(',', ' ') +
+        f"{eff_rate:,} руб/чел за {h_str} часовую программу:\n".replace(",", " ") +
+        disc_line +
+        rs_line +
         f"{prog_text}\n"
         f"Минимальная плата за игру вносится за {min_note} чел\n"
     )
@@ -1179,13 +1194,6 @@ def _studio_offer(hall, sel, people, has_birthday, discount, rs):
         "Мы находимся по адресу: Денисовский переулок 30. стр. 1\n"
         "https://yandex.ru/maps/-/CLX9FCjI"
     )
-    if rs:
-        offer += "\n\n*При оплате по расчётному счёту стоимость с +10%*"
-    if discount:
-        if discount['type'] == 'fixed':
-            offer += f"\n💰 Скидка: -{discount['value']:,} руб".replace(',', ' ')
-        elif discount['type'] == 'pct':
-            offer += f"\n💰 Скидка: -{discount['value']}%"
     return offer, total
 
 def _vyezd_offer(sel, people, km, velkom_type, discount, rs):
@@ -1198,29 +1206,39 @@ def _vyezd_offer(sel, people, km, velkom_type, discount, rs):
         if people <= b:
             base = VYEZD_BASE.get((tier, b), 0); break
     total = base
-    if 'vedenie' in sel:
-        total += int(VEDENIE_PER_HOUR * _dur_hours(sel['vedenie']))
-    if 'velkom' in sel and velkom_type:
-        vrate = DISCO_PER_HOUR if velkom_type == 'dj' else VEDENIE_PER_HOUR
-        total += int(vrate * _dur_hours(sel['velkom']))
-    if 'disco' in sel:
-        total += int(DISCO_PER_HOUR * _dur_hours(sel['disco']))
+    if "vedenie" in sel:
+        total += int(VEDENIE_PER_HOUR * _dur_hours(sel["vedenie"]))
+    if "velkom" in sel and velkom_type:
+        vrate = DISCO_PER_HOUR if velkom_type == "dj" else VEDENIE_PER_HOUR
+        total += int(vrate * _dur_hours(sel["velkom"]))
+    if "disco" in sel:
+        total += int(DISCO_PER_HOUR * _dur_hours(sel["disco"]))
     log = _logistics(km)
     total += log
+
+    # Скидка применяется до RS
+    disc_line = ""
     if discount:
-        if discount['type'] == 'fixed':
-            total -= discount['value']
-        elif discount['type'] == 'pct':
-            total = int(total * (1 - discount['value'] / 100))
-    if rs: total = int(total * 1.1)
+        if discount["type"] == "fixed":
+            total -= discount["value"]
+            disc_line = f"💰 Скидка: -{discount['value']:,} ₽\n".replace(",", " ")
+        elif discount["type"] == "pct":
+            total = int(total * (1 - discount["value"] / 100))
+            disc_line = f"💰 Скидка: -{discount['value']}%\n"
+    rs_line = ""
+    if rs:
+        total = int(total * 1.1)
+        rs_line = "*Оплата по РС +10%*\n"
 
     total_h = sum(_dur_hours(d) for d in sel.values()) or gh
     h_str = _h_fmt(total_h)
     prog_text = _prog_str(sel)
 
     offer = (
-        f"Стоимость выезда на {people} человек составит {total:,} ₽\n\n".replace(',', ' ') +
-        "За эту цену к вам приедет:\n"
+        f"Стоимость выезда на {people} человек составит {total:,} ₽\n".replace(",", " ") +
+        disc_line +
+        rs_line +
+        "\nЗа эту цену к вам приедет:\n"
         "🧔🏽‍♂️ красивый ведущий\n"
         "😎 почти красивый диджей\n"
         "🎙 всё наше студийное оборудование — колонки, микрофоны, светящиеся тумбы, "
@@ -1230,14 +1248,7 @@ def _vyezd_offer(sel, people, km, velkom_type, discount, rs):
         f"{prog_text}"
     )
     if log > 0:
-        offer += f"\n\nЛогистика ({km:.0f} км от МКАД): +{log:,} ₽".replace(',', ' ')
-    if rs:
-        offer += "\n\n*При оплате по расчётному счёту стоимость с +10%*"
-    if discount:
-        if discount['type'] == 'fixed':
-            offer += f"\n💰 Скидка: -{discount['value']:,} ₽".replace(',', ' ')
-        elif discount['type'] == 'pct':
-            offer += f"\n💰 Скидка: -{discount['value']}%"
+        offer += f"\n\nЛогистика ({km:.0f} км от МКАД): +{log:,} ₽".replace(",", " ")
     return offer, total
 
 # ── Клавиатуры калькулятора ────────────────────────────────────────────────
