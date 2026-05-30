@@ -1517,6 +1517,7 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             msg = await query.message.reply_text("Главное меню:", reply_markup=kb_main())
             track(ctx, msg.message_id)
+        return ConversationHandler.END
 
 async def cmd_kp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
@@ -2154,7 +2155,9 @@ async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cancel_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
     await delete_tracked(ctx, update.effective_chat.id)
-    await update.message.reply_text("Отменено. Напиши /start")
+    ctx.user_data.clear()
+    msg = await update.message.reply_text("Главное меню:", reply_markup=kb_main())
+    track(ctx, msg.message_id)
     return ConversationHandler.END
 
 
@@ -2194,6 +2197,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(calc_start, pattern=r'^menu_calc$'),
         ],
+        allow_reentry=True,
         states={
             CALC_FORMAT:   [CallbackQueryHandler(calc_got_format,  pattern=r'^calc_')],
             CALC_STUDIO_DUR: [CallbackQueryHandler(calc_studio_dur, pattern=r'^sd_')],
@@ -2217,6 +2221,7 @@ def main():
             CommandHandler("kp", cmd_kp),
             CallbackQueryHandler(menu_cb, pattern=r'^menu_kp$'),
         ],
+        allow_reentry=True,
         states={
             KP_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, kp_name)],
             KP_LOC:     [CallbackQueryHandler(kp_location, pattern=r'^(loc_|cancel)')],
@@ -2236,6 +2241,7 @@ def main():
             CommandHandler("docs", cmd_docs),
             CallbackQueryHandler(menu_cb, pattern=r'^menu_docs$'),
         ],
+        allow_reentry=True,
         states={
             DOC_MENU: [
                 CallbackQueryHandler(menu_cb, pattern=r'^(menu_docs|menu_all_docs|menu_back|cancel)$'),
