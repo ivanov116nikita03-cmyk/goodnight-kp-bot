@@ -555,10 +555,11 @@ def kb_program(sel, fmt, dur_mode=None, done_cb="prog_done", exclude=None):
                 row.append(up)
                 row.append(down)
         rows.append(row)
-    # Потом невыбранные (без исключённых)
+    # Потом невыбранные (без исключённых) — показываем дефолтный тайминг
     for bid, bname in PROGRAM_BLOCKS:
         if bid not in sel and (not exclude or bid not in exclude):
-            rows.append([InlineKeyboardButton(f"☐  {bname}", callback_data=f"tog_{bid}")])
+            default_dur = get_base_dur(bid, fmt)
+            rows.append([InlineKeyboardButton(f"☐  {bname} — {default_dur}", callback_data=f"tog_{bid}")])
     rows.append([
         InlineKeyboardButton("✔ Готово",  callback_data=done_cb),
         InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
@@ -1108,8 +1109,15 @@ VYEZD_BASE = {
 VEDENIE_PER_HOUR = 14000
 DISCO_PER_HOUR   = 9000
 GAME_BLOCKS_SET       = {'gn', 'kk', 'bad', 'ktokogo', 'arenda'}
-VYEZD_GAME_BLOCKS_SET = {'gn', 'kk', 'bad', 'ktokogo'}   # без аренды
-VYEZD_EXCLUDE         = {'arenda'}                         # блоки скрытые на выезде
+VYEZD_GAME_BLOCKS_SET = {'gn', 'kk', 'bad', 'ktokogo'}
+VYEZD_EXCLUDE         = {'arenda'}
+
+# Доп. услуги студии — фиксированная стоимость поверх цены с человека (руб/час)
+STUDIO_EXTRA_PRICES = {
+    'disco':   9000,
+    'mafia':   15000,
+    'vedenie': 14000,
+}
 
 CALC_FORMAT, CALC_PROG, CALC_PEOPLE, CALC_DISTANCE, \
 CALC_BIRTHDAY, CALC_TODAY, CALC_RS, CALC_VELKOM_T = range(40, 48)
@@ -1155,7 +1163,9 @@ def _prog_str(sel):
     return '\n'.join(parts)
 
 def _studio_offer(hall, sel, people, has_birthday, discount, rs):
-    gh = _game_hours(sel)
+    # Игровые блоки определяют тир цены с человека
+    GAME_ONLY = {'gn', 'kk', 'bad', 'ktokogo'}
+    gh = sum(_dur_hours(dur) for bid, dur in sel.items() if bid in GAME_ONLY)
     if gh == 0:
         gh = sum(_dur_hours(d) for d in sel.values()) or 1.0
     tier = _studio_tier(gh)
@@ -1163,38 +1173,46 @@ def _studio_offer(hall, sel, people, has_birthday, discount, rs):
     min_ppl = STUDIO_MIN_PPL[hall]
     minimum = STUDIO_MIN_TOTALS.get((hall, tier), base_rate * min_ppl)
 
-    # Эффективная цена с человека — применяем скидки и РС
+    # Доп. услуги — фиксированная стоимость (не с человека)
+    extra_total = 0
+    for bid, price_per_h in STUDIO_EXTRA_PRICES.items():
+        if bid in sel:
+            extra_total += int(price_per_h * _dur_hours(sel[bid]))
+
+    # Скидки и РС
     eff_rate = base_rate
     disc_line = ""
     if discount:
         if discount["type"] == "pct":
             eff_rate = int(base_rate * (1 - discount["value"] / 100))
-            disc_line = f"💰 Скидка -{discount['value']}% → {eff_rate:,} руб/чел\n".replace(",", " ")
+            disc_line = f"💰 Скидка -{discount['value']}%\n"
         elif discount["type"] == "fixed":
             disc_line = f"💰 Скидка: -{discount['value']:,} руб\n".replace(",", " ")
-    rs_line = ""
+    rs_note = ""
     if rs:
         eff_rate = int(eff_rate * 1.1)
-        rs_line = f"*Оплата по РС +10% → {eff_rate:,} руб/чел*\n".replace(",", " ")
+        extra_total = int(extra_total * 1.1)
+        rs_note = "*Оплата по РС +10%*\n"
 
-    # Итог для отображения (не в оффере, только для справки)
     eff_ppl = people - (1 if has_birthday and people >= 10 else 0)
-    total_raw = eff_rate * eff_ppl
+    per_person_total = max(eff_rate * eff_ppl, minimum)
     if discount and discount["type"] == "fixed":
-        total_raw -= discount["value"]
-    total = max(total_raw, minimum)
+        per_person_total -= discount["value"]
+    total = per_person_total + extra_total
 
-    total_h = sum(_dur_hours(d) for d in sel.values()) or gh
-    h_str = _h_fmt(total_h)
     prog_text = _prog_str(sel)
     min_note = "10" if hall == "велком" else "8"
-    add_velkom = not (tier >= 3.0 and "velkom" in sel)
+    add_velkom = tier < 3.0  # на 3-часовом пакете велком-строка не нужна
+
+    price_line = (
+        f"{eff_rate:,} руб/чел + {extra_total:,} руб за:\n".replace(",", " ")
+        if extra_total > 0 else
+        f"{eff_rate:,} руб/чел за:\n".replace(",", " ")
+    )
 
     offer = (
-        f"Стоимость игры в студии:\n"
-        f"{eff_rate:,} руб/чел за:\n".replace(",", " ") +
-        disc_line +
-        rs_line +
+        "Стоимость игры в студии:\n" +
+        price_line + disc_line + rs_note +
         f"{prog_text}\n"
         f"Минимальная плата за игру вносится за {min_note} чел\n"
     )
@@ -1383,7 +1401,13 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return CALC_PROG
         ctx.user_data['calc_sel'] = sel
-        await q.edit_message_text("Сколько человек?")
+        # Убираем клавиатуру чтобы предотвратить повторные нажатия
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        msg = await q.message.reply_text("Сколько человек?")
+        track(ctx, msg.message_id)
         return CALC_PEOPLE
 
     ctx.user_data['calc_sel'] = sel
@@ -2353,7 +2377,6 @@ def main():
             CommandHandler("start", cmd_start),
         ],
         per_message=False,
-        allow_reentry=True,
     )
 
     kp_conv = ConversationHandler(
