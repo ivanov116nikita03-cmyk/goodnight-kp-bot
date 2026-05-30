@@ -1,6 +1,7 @@
 # Файл bot.py — полная версия с экраном редактирования карточки
 
 import os
+import asyncio
 import traceback
 from generate_kp import make_kp_pdf
 import re
@@ -18,6 +19,9 @@ from telegram.ext import (
 from telegram.error import BadRequest
 
 TOKEN = os.environ.get("BOT_TOKEN", "")
+
+# Инициализируется в post_init после запуска event loop
+LO_SEM = None
 
 TEMPLATE_BIG   = "template_big.pptx"
 TEMPLATE_SMALL = "template_small.pptx"
@@ -1501,8 +1505,12 @@ async def calc_got_rs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
+    chat_id = update.effective_chat.id
+    await safe_delete(ctx.bot, chat_id, update.message.message_id)
+    # Удаляем все старые сообщения бота из чата
+    await delete_tracked(ctx, chat_id)
     msg = await update.message.reply_text("Главное меню:", reply_markup=kb_main())
+    ctx.user_data.clear()
     track(ctx, msg.message_id)
 
 async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1701,14 +1709,16 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
             track(ctx, msg.message_id)
         return ConversationHandler.END
-    await q.edit_message_text("Готовлю КП...")
+    await q.edit_message_text("⏳ Готовлю КП...")
     try:
         d = ctx.user_data
-        path, fname, tmp_dir = make_kp_pdf(
-            d['location'], d['name'], d['date'], d['time'],
-            d['program_lines'], d['price'],
-            d.get('address', '')
-        )
+        async with LO_SEM:
+            path, fname, tmp_dir = await asyncio.to_thread(
+                make_kp_pdf,
+                d['location'], d['name'], d['date'], d['time'],
+                d['program_lines'], d['price'],
+                d.get('address', '')
+            )
         with open(path, 'rb') as f:
             await q.message.reply_document(document=f, filename=fname)
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1717,7 +1727,7 @@ async def kp_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         tb = traceback.format_exc()
         print(f"BUILD_KP ERROR: {tb}")
-        await q.message.reply_text(f"Ошибка: {e}")
+        await q.message.reply_text(f"Ошибка генерации КП: {e}")
     return ConversationHandler.END
 
 
@@ -2157,9 +2167,10 @@ async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             msg = await q.message.reply_text("Главное меню:", reply_markup=kb_main())
             track(ctx, msg.message_id)
         return ConversationHandler.END
-    await q.edit_message_text("Готовлю документы...")
+    await q.edit_message_text("⏳ Готовлю документы...")
     try:
-        files, tmp_dir = build_docs(ctx.user_data)
+        async with LO_SEM:
+            files, tmp_dir = await asyncio.to_thread(build_docs, ctx.user_data)
         for fpath, fname in files:
             with open(fpath, 'rb') as f:
                 await q.message.reply_document(document=f, filename=fname)
@@ -2175,8 +2186,9 @@ async def doc_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def cancel_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await safe_delete(ctx.bot, update.effective_chat.id, update.message.message_id)
-    await delete_tracked(ctx, update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    await safe_delete(ctx.bot, chat_id, update.message.message_id)
+    await delete_tracked(ctx, chat_id)
     ctx.user_data.clear()
     msg = await update.message.reply_text("Главное меню:", reply_markup=kb_main())
     track(ctx, msg.message_id)
@@ -2198,6 +2210,8 @@ async def global_doc_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer("Начни заново через меню.", show_alert=True)
 
 async def post_init(app):
+    global LO_SEM
+    LO_SEM = asyncio.Semaphore(3)  # создаём внутри event loop
     await app.bot.set_my_commands([
         BotCommand("start",  "Главное меню"),
         BotCommand("cancel", "Отменить"),
@@ -2271,22 +2285,14 @@ def main():
             DOC_MENU: [
                 CallbackQueryHandler(menu_cb, pattern=r'^(menu_docs|menu_schet_akt|menu_all_docs|menu_back|cancel)$'),
             ],
-            DOC_NUM:         [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_num)],
-            DOC_DATE_EVENT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_date)],
-            DOC_TIME:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_time)],
-            DOC_ADDR:        [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_addr)],
-            DOC_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_price)],
             DOC_TYPE:        [CallbackQueryHandler(doc_type, pattern=r'^(type_|cancel)')],
             DOC_FREE_INPUT:  [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, doc_free_input),
-                CallbackQueryHandler(doc_form_cb),
             ],
-            DOC_PAY_DATE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, doc_pay_date)],
             DOC_CARD:        [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, doc_card_text),
                 MessageHandler(filters.Document.ALL, doc_card_file),
             ],
-            # НОВЫЕ состояния: анкета карточки
             DOC_CARD_REVIEW: [
                 CallbackQueryHandler(doc_card_review_cb),
             ],
