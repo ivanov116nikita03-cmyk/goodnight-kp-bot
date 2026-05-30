@@ -1334,9 +1334,8 @@ async def calc_program_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return CALC_PROG
         ctx.user_data['calc_sel'] = sel
-        # Убираем клавиатуру чтобы предотвратить повторные нажатия
         try:
-            await q.edit_message_reply_markup(reply_markup=None)
+            await safe_delete(ctx.bot, q.message.chat_id, q.message.message_id)
         except Exception:
             pass
         msg = await q.message.reply_text("Сколько человек?")
