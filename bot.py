@@ -1173,6 +1173,8 @@ def _vyezd_offer(sel, people, km, velkom_type, discount, rs):
         total += int(vrate * _dur_hours(sel["velkom"]))
     if "disco" in sel:
         total += int(DISCO_PER_HOUR * _dur_hours(sel["disco"]))
+    if "mafia" in sel:
+        total += int(15000 * _dur_hours(sel["mafia"]))
     log = _logistics(km)
     total += log
 
