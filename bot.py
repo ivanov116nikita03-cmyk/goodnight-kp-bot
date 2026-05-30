@@ -1563,12 +1563,20 @@ async def calc_got_rs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         today_disc   = ctx.user_data.get("calc_today_disc", False)
         discount     = ctx.user_data.get('calc_discount')
         offer, _     = _studio_offer(hall, sel, people, has_birthday, discount, rs)
+    offer_msg_id = query.message.message_id
     try:
         await query.edit_message_text(offer, reply_markup=menu_kb)
     except Exception as e:
         tb = traceback.format_exc()
         print(f"CALC_OFFER ERROR: {tb}")
         await query.message.reply_text(f"Ошибка при генерации оффера: {e}")
+        return ConversationHandler.END
+    # Удаляем все промежуточные сообщения, кроме оффера
+    chat_id = query.message.chat_id
+    for mid in ctx.user_data.get('msg_ids', []):
+        if mid != offer_msg_id:
+            await safe_delete(ctx.bot, chat_id, mid)
+    ctx.user_data['msg_ids'] = []
     return ConversationHandler.END
 
 
