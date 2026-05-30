@@ -1235,6 +1235,11 @@ def _vyezd_offer(sel, people, km, velkom_type, discount, rs):
     for b in brackets:
         if people <= b:
             base = VYEZD_BASE.get((tier, b), 0); break
+    if base == 0:
+        # Свыше 40 чел: +5 000 руб за каждые следующие 5 чел (округление вверх)
+        base_40 = VYEZD_BASE.get((tier, 40), 0)
+        extra_groups = _math.ceil((people - 40) / 5)
+        base = base_40 + extra_groups * 5000
     total = base
     if "vedenie" in sel:
         total += int(VEDENIE_PER_HOUR * _dur_hours(sel["vedenie"]))
@@ -1548,9 +1553,6 @@ async def calc_got_rs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         velkom_type = ctx.user_data.get("calc_velkom_type")
         if _game_hours(sel) == 0:
             await query.edit_message_text("Не выбраны основные блоки. Начни заново.", reply_markup=menu_kb)
-            return ConversationHandler.END
-        if people > 40:
-            await query.edit_message_text("Более 40 человек — рассчитывается индивидуально.", reply_markup=menu_kb)
             return ConversationHandler.END
         discount = ctx.user_data.get('calc_discount')
         offer, _ = _vyezd_offer(sel, people, km, velkom_type, discount, rs)
